@@ -1,0 +1,52 @@
+gcloud compute instances create rick-training-spot-1 \
+    --project=$MY_PROJECT_ID \
+    --zone=us-central1-a \
+    --machine-type=g2-standard-4 \
+    --provisioning-model=SPOT \
+    --maintenance-policy=TERMINATE \
+    --image-family=common-cu121-debian-11-py310 \
+    --image-project=deeplearning-platform-release \
+    --scopes=https://www.googleapis.com/auth/cloud-platform \
+    --metadata=install-nvidia-driver=True,target_bucket=$MY_BUCKET_NAME \
+    --metadata-from-file startup-script=<(cat <<EOF
+#! /bin/bash
+set -e
+
+# --- 1. Fetch Configuration from Metadata ---
+# The VM queries its own metadata server to find out which bucket to use
+TARGET_BUCKET=\$(curl -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/attributes/target_bucket)
+
+# Export this so Python can see it later
+export GCS_BUCKET_NAME=\$TARGET_BUCKET
+
+echo "Configured to use bucket: \$TARGET_BUCKET"
+
+# --- 2. Install System Dependencies ---
+apt-get update
+apt-get install -y ffmpeg git build-essential
+
+# --- 3. Setup Python Environment ---
+pip install --upgrade pip
+pip install --upgrade "jax[cuda12_pip]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+
+# --- 4. Download Code ---
+# We use the bucket variable we fetched earlier
+gsutil cp gs://\$TARGET_BUCKET/train.py .
+gsutil cp gs://\$TARGET_BUCKET/requirements.txt .
+
+# --- 5. Install requirements ---
+pip install -r requirements.txt
+
+# --- 6. Run Training ---
+# We pipe output to a log file
+echo "Starting training..."
+python3 train.py > training_log.txt 2>&1
+
+# --- 7. Upload final log ---
+gsutil cp training_log.txt gs://\$TARGET_BUCKET/logs/
+
+# --- 8. Safe Shutdown (Stops billing) ---
+echo "Training finished. Shutting down."
+sudo shutdown -h now
+EOF
+)

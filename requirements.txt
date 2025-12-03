@@ -1,0 +1,8 @@
+mujoco
+mujoco_mjx
+brax
+mediapy
+etils
+matplotlib
+ml_collections
+# We will install JAX specifically for CUDA in the startup script
