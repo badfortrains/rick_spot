@@ -13,39 +13,38 @@ gcloud compute instances create rick-training-spot-1 \
 set -e
 
 # --- 1. Fetch Configuration from Metadata ---
-# The VM queries its own metadata server to find out which bucket to use
+# The VM queries itself to find out which bucket to use for OUTPUTS (Checkpoints/Logs)
 TARGET_BUCKET=\$(curl -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/attributes/target_bucket)
 
 # Export this so Python can see it later
 export GCS_BUCKET_NAME=\$TARGET_BUCKET
 
-echo "Configured to use bucket: \$TARGET_BUCKET"
+echo "Configured to upload results to: \$TARGET_BUCKET"
 
 # --- 2. Install System Dependencies ---
 apt-get update
-apt-get install -y ffmpeg git build-essential
+apt-get install -y ffmpeg git build-essential wget
 
 # --- 3. Setup Python Environment ---
 pip install --upgrade pip
 pip install --upgrade "jax[cuda12_pip]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
 
-# --- 4. Download Code ---
-# We use the bucket variable we fetched earlier
-gsutil cp gs://\$TARGET_BUCKET/train.py .
-gsutil cp gs://\$TARGET_BUCKET/requirements.txt .
+# --- 4. Download Code from GitHub ---
+echo "Downloading code from GitHub..."
+wget https://raw.githubusercontent.com/badfortrains/rick_spot/refs/heads/main/train.py
+wget https://raw.githubusercontent.com/badfortrains/rick_spot/refs/heads/main/requirements.txt
 
 # --- 5. Install requirements ---
 pip install -r requirements.txt
 
 # --- 6. Run Training ---
-# We pipe output to a log file
 echo "Starting training..."
 python3 train.py > training_log.txt 2>&1
 
 # --- 7. Upload final log ---
 gsutil cp training_log.txt gs://\$TARGET_BUCKET/logs/
 
-# --- 8. Safe Shutdown (Stops billing) ---
+# --- 8. Safe Shutdown ---
 echo "Training finished. Shutting down."
 sudo shutdown -h now
 EOF
