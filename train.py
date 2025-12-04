@@ -15,6 +15,27 @@ if not BUCKET_NAME:
 GCS_BUCKET_URI = f'gs://{BUCKET_NAME}/rick_v2_checkpoints'
 # ---------------------
 
+
+try:
+    if not jax.devices('gpu'):
+        raise RuntimeError("JAX could not find any GPU devices.")
+    else:
+        print(f"JAX found the following devices: {jax.devices()}")
+
+except Exception as e:
+    print(f"Error checking JAX devices: {e}")
+    # Fallback/Debug: print system devices
+    subprocess.run(['nvidia-smi'])
+    raise RuntimeError("GPU not available to JAX. Check your setup.")
+
+
+if subprocess.run('nvidia-smi').returncode:
+  raise RuntimeError(
+      'Cannot communicate with GPU. '
+      'Make sure you are using a GPU Colab runtime. '
+      'Go to the Runtime menu and select Choose runtime type.')
+
+
 # 1. Setup EGL for Headless Rendering
 print("Configuring EGL...")
 NVIDIA_ICD_CONFIG_PATH = '/usr/share/glvnd/egl_vendor.d/10_nvidia.json'
@@ -29,9 +50,12 @@ with open(NVIDIA_ICD_CONFIG_PATH, 'w') as f:
     }
 }
 """)
+    
 
 os.environ['MUJOCO_GL'] = 'egl'
-os.environ['XLA_FLAGS'] = '--xla_gpu_triton_gemm_any=True'
+xla_flags = os.environ.get('XLA_FLAGS', '')
+xla_flags += ' --xla_gpu_triton_gemm_any=True'
+os.environ['XLA_FLAGS'] = xla_flags
 
 # 2. Imports
 import jax
