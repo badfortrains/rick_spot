@@ -9,6 +9,15 @@ export GCS_BUCKET_NAME=\$TARGET_BUCKET
 apt-get update
 apt-get install -y ffmpeg git build-essential wget libegl-dev python3-pip python3-venv
 
+# The DLVM background process might still be installing drivers.
+# We loop until nvidia-smi runs successfully.
+echo "Checking for GPU drivers..."
+while ! nvidia-smi; do
+  echo "Waiting for GPU drivers to initialize..."
+  sleep 10
+done
+echo "GPU driver detected!"
+
 # --- 3. Create and Activate Virtual Environment ---
 # We create the env in /opt so it is separate from system python
 python3 -m venv /opt/venv
