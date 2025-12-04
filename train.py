@@ -243,15 +243,77 @@ def policy_params_fn(current_step, make_policy, params):
 def progress(num_steps, metrics):
     print(f"Step: {num_steps}, Reward: {metrics['eval/episode_reward']:.3f}, Std: {metrics['eval/episode_reward_std']:.3f}")
 
+
+def get_latest_checkpoint_from_gcs(gcs_uri):
+    """Finds the latest checkpoint step in GCS."""
+    print(f"Checking for checkpoints in {gcs_uri}...")
+    try:
+        # List directories in the GCS bucket
+        result = subprocess.run(
+            ['gsutil', 'ls', gcs_uri], 
+            capture_output=True, text=True
+        )
+        
+        if result.returncode != 0:
+            print("No existing checkpoints found (or bucket inaccessible).")
+            return None, None
+
+        # Parse paths to find the largest integer step
+        # Expected format: gs://bucket/.../1000/
+        paths = result.stdout.strip().split('\n')
+        checkpoints = []
+        for p in paths:
+            # clean trailing slash
+            clean_p = p.rstrip('/')
+            try:
+                # Get the last segment and convert to int
+                step = int(clean_p.split('/')[-1])
+                checkpoints.append((step, p))
+            except ValueError:
+                continue
+        
+        if not checkpoints:
+            return None, None
+
+        # Sort by step count (ascending) and get the last one
+        latest_step, latest_path = sorted(checkpoints)[-1]
+        return latest_step, latest_path
+
+    except Exception as e:
+        print(f"Error checking GCS: {e}")
+        return None, None
+
+latest_step, latest_gcs_path = get_latest_checkpoint_from_gcs(GCS_BUCKET_URI)
+restore_path = None
+
+if latest_gcs_path:
+    print(f"Found latest checkpoint: {latest_step}")
+    
+    # 2. Download to local tmp
+    local_restore_dir = epath.Path(f'/tmp/rick_v2_restore/{latest_step}')
+    local_restore_dir.mkdir(parents=True, exist_ok=True)
+    
+    print(f"Downloading {latest_gcs_path} to {local_restore_dir}...")
+    subprocess.run(
+        ['gsutil', '-m', 'cp', '-r', f"{latest_gcs_path}*", str(local_restore_dir)], 
+        check=True
+    )
+    
+    # 3. Set the path for Brax
+    restore_path = str(local_restore_dir)
+    print("Restore path set successfully.")
+else:
+    print("Starting fresh training run.")
+
 print("Starting Training...")
 start_time = datetime.now()
 
 train_fn = functools.partial(
-    ppo.train, num_timesteps=100_000_000, num_evals=5, reward_scaling=0.1,
+    ppo.train, num_timesteps=100_000_000, num_evals=30, reward_scaling=0.1,
     episode_length=1000, normalize_observations=True, action_repeat=5,
     unroll_length=50, num_minibatches=32, num_updates_per_batch=8,
     discounting=0.995, learning_rate=3e-4, entropy_cost=1e-3, num_envs=4096,
-    batch_size=1024, seed=0, policy_params_fn=policy_params_fn)
+    batch_size=1024, seed=0, policy_params_fn=policy_params_fn, restore_checkpoint_path=restore_path)
 
 make_inference_fn, params, _ = train_fn(environment=env, progress_fn=progress)
 
