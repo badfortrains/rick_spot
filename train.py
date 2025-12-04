@@ -5,6 +5,7 @@ import functools
 import shutil
 from datetime import datetime
 from typing import Any, Dict, Sequence, Tuple, Union
+import jax
 
 # --- CONFIGURATION ---
 BUCKET_NAME = os.environ.get('GCS_BUCKET_NAME')
@@ -58,7 +59,6 @@ xla_flags += ' --xla_gpu_triton_gemm_any=True'
 os.environ['XLA_FLAGS'] = xla_flags
 
 # 2. Imports
-import jax
 from jax import numpy as jp
 import numpy as np
 from etils import epath

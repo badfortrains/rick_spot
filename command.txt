@@ -1,7 +1,7 @@
 gcloud compute instances create rick-training-spot-1 \
     --project=$MY_PROJECT_ID \
     --zone=us-west4-a \
-    --machine-type=g2-standard-32 \
+    --machine-type=g2-standard-16 \
     --provisioning-model=SPOT \
     --maintenance-policy=TERMINATE \
     --image-family=common-cu128-ubuntu-2204-nvidia-570 \

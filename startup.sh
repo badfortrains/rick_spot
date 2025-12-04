@@ -35,7 +35,7 @@ wget https://raw.githubusercontent.com/badfortrains/rick_spot/refs/heads/main/re
 pip install -r requirements.txt
 
 # Install JAX specifically after (or ensure requirements.txt doesn't overwrite it with CPU version)
-pip install --upgrade "jax[cuda12_pip]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+pip install --upgrade "jax[cuda12]"
 
 # --- 7. Run Training ---
 echo "Starting training..."
