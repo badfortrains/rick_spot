@@ -1,6 +1,6 @@
 gcloud compute instances create rick-training-spot-1 \
     --project=$MY_PROJECT_ID \
-    --zone=us-west4-a \
+    --zone=northamerica-northeast1-b \
     --machine-type=g2-standard-16 \
     --provisioning-model=SPOT \
     --maintenance-policy=TERMINATE \

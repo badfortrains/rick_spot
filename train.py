@@ -97,9 +97,12 @@ class Biped(PipelineEnv):
   ):
     path = ROOT_RICK_PATH / "assemblyDerived_v8.xml"
     mj_model = mujoco.MjModel.from_xml_path(path.as_posix())
-    mj_model.opt.solver = mujoco.mjtSolver.mjSOL_CG
-    mj_model.opt.iterations = 6
-    mj_model.opt.ls_iterations = 6
+    # mj_model.opt.solver = mujoco.mjtSolver.mjSOL_CG
+    # mj_model.opt.iterations = 6
+    # mj_model.opt.ls_iterations = 6
+    mj_model.opt.solver = mujoco.mjtSolver.mjSOL_NEWTON
+    mj_model.opt.iterations = 2
+    mj_model.opt.ls_iterations = 5
 
     sys = mjcf.load_model(mj_model)
 
@@ -241,7 +244,7 @@ def policy_params_fn(current_step, make_policy, params):
 
 # Headless progress reporter
 def progress(num_steps, metrics):
-    print(f"Step: {num_steps}, Reward: {metrics['eval/episode_reward']:.3f}, Std: {metrics['eval/episode_reward_std']:.3f}")
+    print(f"Step: {num_steps}, Reward: {metrics['eval/episode_reward']:.3f}, Std: {metrics['eval/episode_reward_std']:.3f}", flush=True)
 
 
 def get_latest_checkpoint_from_gcs(gcs_uri):
@@ -309,9 +312,9 @@ print("Starting Training...")
 start_time = datetime.now()
 
 train_fn = functools.partial(
-    ppo.train, num_timesteps=100_000_000, num_evals=30, reward_scaling=0.1,
+    ppo.train, num_timesteps=40_000_000, num_evals=50, reward_scaling=0.1,
     episode_length=1000, normalize_observations=True, action_repeat=5,
-    unroll_length=50, num_minibatches=32, num_updates_per_batch=8,
+    unroll_length=10, num_minibatches=32, num_updates_per_batch=8,
     discounting=0.995, learning_rate=3e-4, entropy_cost=1e-3, num_envs=4096,
     batch_size=1024, seed=0, policy_params_fn=policy_params_fn, restore_checkpoint_path=restore_path)
 
