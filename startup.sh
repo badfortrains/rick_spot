@@ -1,6 +1,10 @@
 #! /bin/bash
 set -e
 
+# Install ops-agent for GPU monitoring
+curl -sSO https://dl.google.com/cloudagents/add-google-cloud-ops-agent-repo.sh
+sudo bash add-google-cloud-ops-agent-repo.sh --also-install
+
 # --- 1. Fetch Configuration ---
 TARGET_BUCKET=$(curl -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/attributes/target_bucket)
 export GCS_BUCKET_NAME=$TARGET_BUCKET
