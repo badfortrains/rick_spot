@@ -247,11 +247,11 @@ print("Starting Training...")
 start_time = datetime.now()
 
 train_fn = functools.partial(
-    ppo.train, num_timesteps=4_000_000, num_evals=5, reward_scaling=0.1,
-    episode_length=1000, normalize_observations=True, action_repeat=1,
-    unroll_length=50, num_minibatches=24, num_updates_per_batch=8,
-    discounting=0.97, learning_rate=3e-4, entropy_cost=2e-3, num_envs=3072,
-    batch_size=512, seed=0, policy_params_fn=policy_params_fn)
+    ppo.train, num_timesteps=100_000_000, num_evals=5, reward_scaling=0.1,
+    episode_length=1000, normalize_observations=True, action_repeat=5,
+    unroll_length=50, num_minibatches=32, num_updates_per_batch=8,
+    discounting=0.995, learning_rate=3e-4, entropy_cost=1e-3, num_envs=4096,
+    batch_size=1024, seed=0, policy_params_fn=policy_params_fn)
 
 make_inference_fn, params, _ = train_fn(environment=env, progress_fn=progress)
 
