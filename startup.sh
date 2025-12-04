@@ -3,7 +3,7 @@ set -e
 
 # --- 1. Fetch Configuration ---
 TARGET_BUCKET=$(curl -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/attributes/target_bucket)
-export GCS_BUCKET_NAME=\$TARGET_BUCKET
+export GCS_BUCKET_NAME=$TARGET_BUCKET
 
 # --- 2. System Deps ---
 apt-get update
