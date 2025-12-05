@@ -174,7 +174,7 @@ class Biped(PipelineEnv):
     forward_dir_normalized = forward_dir / (jp.linalg.norm(forward_dir) + 1e-8)
     forward_velocity = jp.dot(vel_2d, forward_dir_normalized)
     # Define a target speed (meters/s)
-    target_speed = 0.03
+    target_speed = 0.04
     #vel_dir_normalized = vel_2d / (jp.linalg.norm(vel_2d) + 1e-8)
     
     #forward_reward = self._forward_reward_weight * jp.dot(vel_dir_normalized, forward_dir_normalized) * jp.linalg.norm(vel_2d)
