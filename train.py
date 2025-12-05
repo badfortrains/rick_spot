@@ -84,8 +84,8 @@ jax.config.update('jax_default_matmul_precision', 'high')
 class Biped(PipelineEnv):
   def __init__(
       self,
-      forward_reward_weight=20.0,
-      ctrl_cost_weight=0.5,
+      forward_reward_weight=10.0,
+      ctrl_cost_weight=0.1,
       sideways_cost_weight=0.5,
       sideways_body_cost=0.2,
       healthy_reward=1.0,
@@ -173,12 +173,12 @@ class Biped(PipelineEnv):
     sideways_dir_normalized = sideways_dir/ (jp.linalg.norm(sideways_dir) + 1e-8)
     forward_dir_normalized = forward_dir / (jp.linalg.norm(forward_dir) + 1e-8)
     forward_velocity = jp.dot(vel_2d, forward_dir_normalized)
-    # Define a target speed (50 mm /second)
-    target_speed = 0.07
+    # Define a target speed (meters/s)
+    target_speed = 0.2
     #vel_dir_normalized = vel_2d / (jp.linalg.norm(vel_2d) + 1e-8)
     
     #forward_reward = self._forward_reward_weight * jp.dot(vel_dir_normalized, forward_dir_normalized) * jp.linalg.norm(vel_2d)
-    forward_reward = self._forward_reward_weight * jp.exp(-2.0 * (forward_velocity - target_speed)**2)
+    forward_reward = self._forward_reward_weight * jp.exp(-20.0 * (forward_velocity - target_speed)**2)
     sideways_speed = jp.dot(vel_2d, sideways_dir_normalized)
     sideways_cost = self._sideways_cost_weight * jp.abs(sideways_speed)
 
