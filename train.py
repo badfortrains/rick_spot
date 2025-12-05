@@ -88,7 +88,7 @@ class Biped(PipelineEnv):
       ctrl_cost_weight=0.05,
       sideways_cost_weight=0.5,
       sideways_body_cost=0.2,
-      healthy_reward=2.0,
+      healthy_reward=10.0,
       terminate_when_unhealthy=True,
       healthy_z_range=(0.1, 0.25), 
       reset_noise_scale=1e-2,
@@ -312,7 +312,7 @@ print("Starting Training...")
 start_time = datetime.now()
 
 train_fn = functools.partial(
-    ppo.train, num_timesteps=100_000_000, num_evals=50, reward_scaling=0.1,
+    ppo.train, num_timesteps=100_000_000, num_evals=30, reward_scaling=0.1,
     episode_length=1000, normalize_observations=True, action_repeat=5,
     unroll_length=10, num_minibatches=32, num_updates_per_batch=8,
     discounting=0.97, learning_rate=3e-4, entropy_cost=1e-2, num_envs=4096,
