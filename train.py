@@ -290,6 +290,7 @@ latest_step, latest_gcs_path = get_latest_checkpoint_from_gcs(GCS_BUCKET_URI)
 restore_path = None
 
 if latest_gcs_path:
+    latest_gcs_path = f"{latest_gcs_path}000{latest_step}/"
     print(f"Found latest checkpoint: {latest_step}")
     
     # 2. Download to local tmp
