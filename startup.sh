@@ -44,9 +44,7 @@ pip install --upgrade "jax[cuda12]"
 # --- 7. Run Training ---
 echo "Starting training..."
 # We utilize the python executable inside the venv explicitly
-/opt/venv/bin/python train.py > training_log.txt 2>&1
+/opt/venv/bin/python train.py
 
-# --- 8. Upload & Shutdown ---
-gsutil cp training_log.txt gs://$TARGET_BUCKET/logs/
 echo "Training finished. Shutting down."
 sudo shutdown -h now
