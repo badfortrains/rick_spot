@@ -84,11 +84,11 @@ jax.config.update('jax_default_matmul_precision', 'high')
 class Biped(PipelineEnv):
   def __init__(
       self,
-      forward_reward_weight=10.0,
-      ctrl_cost_weight=0.05,
+      forward_reward_weight=2.0,
+      ctrl_cost_weight=0.5,
       sideways_cost_weight=0.5,
       sideways_body_cost=0.2,
-      healthy_reward=10.0,
+      healthy_reward=1.0,
       terminate_when_unhealthy=True,
       healthy_z_range=(0.1, 0.25), 
       reset_noise_scale=1e-2,
@@ -97,12 +97,12 @@ class Biped(PipelineEnv):
   ):
     path = ROOT_RICK_PATH / "assemblyDerived_v8.xml"
     mj_model = mujoco.MjModel.from_xml_path(path.as_posix())
-    mj_model.opt.solver = mujoco.mjtSolver.mjSOL_CG
-    mj_model.opt.iterations = 6
+    # mj_model.opt.solver = mujoco.mjtSolver.mjSOL_CG
+    # mj_model.opt.iterations = 6
+    # mj_model.opt.ls_iterations = 6
+    mj_model.opt.solver = mujoco.mjtSolver.mjSOL_NEWTON
+    mj_model.opt.iterations = 10 # Newton converges fast, 10 is usually plenty
     mj_model.opt.ls_iterations = 6
-    # mj_model.opt.solver = mujoco.mjtSolver.mjSOL_NEWTON
-    # mj_model.opt.iterations = 2
-    # mj_model.opt.ls_iterations = 5
 
     sys = mjcf.load_model(mj_model)
 
@@ -172,9 +172,13 @@ class Biped(PipelineEnv):
 
     sideways_dir_normalized = sideways_dir/ (jp.linalg.norm(sideways_dir) + 1e-8)
     forward_dir_normalized = forward_dir / (jp.linalg.norm(forward_dir) + 1e-8)
-    vel_dir_normalized = vel_2d / (jp.linalg.norm(vel_2d) + 1e-8)
+    forward_velocity = jp.dot(vel_2d, forward_dir_normalized)
+    # Define a target speed (50 mm /second)
+    target_speed = 0.05
+    #vel_dir_normalized = vel_2d / (jp.linalg.norm(vel_2d) + 1e-8)
     
-    forward_reward = self._forward_reward_weight * jp.dot(vel_dir_normalized, forward_dir_normalized) * jp.linalg.norm(vel_2d)
+    #forward_reward = self._forward_reward_weight * jp.dot(vel_dir_normalized, forward_dir_normalized) * jp.linalg.norm(vel_2d)
+    forward_reward = self._forward_reward_weight * jp.exp(-2.0 * (forward_velocity - target_speed)**2)
     sideways_speed = jp.dot(vel_2d, sideways_dir_normalized)
     sideways_cost = self._sideways_cost_weight * jp.abs(sideways_speed)
 
@@ -314,9 +318,9 @@ start_time = datetime.now()
 
 train_fn = functools.partial(
     ppo.train, num_timesteps=100_000_000, num_evals=30, reward_scaling=0.1,
-    episode_length=1000, normalize_observations=True, action_repeat=5,
-    unroll_length=10, num_minibatches=32, num_updates_per_batch=8,
-    discounting=0.97, learning_rate=3e-4, entropy_cost=1e-2, num_envs=4096,
+    episode_length=1000, normalize_observations=True, action_repeat=1,
+    unroll_length=30, num_minibatches=32, num_updates_per_batch=8,
+    discounting=0.99, learning_rate=3e-4, entropy_cost=1e-3, num_envs=4096,
     batch_size=1024, seed=0, policy_params_fn=policy_params_fn, restore_checkpoint_path=restore_path)
 
 make_inference_fn, params, _ = train_fn(environment=env, progress_fn=progress)
