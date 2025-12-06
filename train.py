@@ -84,7 +84,7 @@ jax.config.update('jax_default_matmul_precision', 'high')
 class Biped(PipelineEnv):
   def __init__(
       self,
-      forward_reward_weight=0.8,
+      forward_reward_weight=5.0,
       ctrl_cost_weight=0.1,
       sideways_cost_weight=0.4,
       sideways_body_cost=0.3,
@@ -317,10 +317,10 @@ print("Starting Training...")
 start_time = datetime.now()
 
 train_fn = functools.partial(
-    ppo.train, num_timesteps=500_000_000, num_evals=50, reward_scaling=0.1,
+    ppo.train, num_timesteps=100_000_000, num_evals=50, reward_scaling=0.1,
     episode_length=1000, normalize_observations=True, action_repeat=1,
     unroll_length=100, num_minibatches=32, num_updates_per_batch=8,
-    discounting=0.99, learning_rate=3e-4, entropy_cost=1e-3, num_envs=4096,
+    discounting=0.97, learning_rate=3e-4, entropy_cost=1e-3, num_envs=4096,
     batch_size=1024, seed=0, policy_params_fn=policy_params_fn, restore_checkpoint_path=restore_path)
 
 make_inference_fn, params, _ = train_fn(environment=env, progress_fn=progress)
