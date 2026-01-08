@@ -84,11 +84,11 @@ jax.config.update('jax_default_matmul_precision', 'high')
 class Biped(PipelineEnv):
   def __init__(
       self,
-      forward_reward_weight=2.0,
+      forward_reward_weight=5.0,
       ctrl_cost_weight=0.05,
       sideways_cost_weight=0.5,
       sideways_body_cost=0.5,
-      healthy_reward=2.0,
+      healthy_reward=1.0,
       terminate_when_unhealthy=True,
       healthy_z_range=(0.02, 0.1), 
       reset_noise_scale=1e-2,
@@ -319,11 +319,24 @@ print("Starting Training...")
 start_time = datetime.now()
 
 train_fn = functools.partial(
-    ppo.train, num_timesteps=100_000_000, num_evals=30, reward_scaling=0.1,
-    episode_length=1000, normalize_observations=True, action_repeat=1,
-    unroll_length=30, num_minibatches=32, num_updates_per_batch=8,
-    discounting=0.99, learning_rate=3e-4, entropy_cost=1e-3, num_envs=4096,
-    batch_size=1024, seed=0, policy_params_fn=policy_params_fn, restore_checkpoint_path=restore_path)
+    ppo.train, 
+    num_timesteps=100_000_000, 
+    num_evals=30, 
+    reward_scaling=1.0,     # Changed from 0.1 (0.1 is very low for standard PPO)
+    episode_length=1000, 
+    normalize_observations=True, 
+    action_repeat=1,
+    unroll_length=20,       # Lower unroll length slightly for unstable dynamics
+    num_minibatches=32, 
+    num_updates_per_batch=8,
+    discounting=0.97,       # Lower discount (0.99 -> 0.97) focuses on immediate survival
+    learning_rate=3e-4, 
+    entropy_cost=0.01,      # Increased exploration
+    num_envs=4096,
+    batch_size=1024, 
+    seed=0, 
+    policy_params_fn=policy_params_fn, 
+    restore_checkpoint_path=restore_path)
 
 make_inference_fn, params, _ = train_fn(environment=env, progress_fn=progress)
 
