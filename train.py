@@ -85,8 +85,8 @@ class Biped(PipelineEnv):
   def __init__(
       self,
       forward_reward_weight=1.0,
-      ctrl_cost_weight=0.1,
-      sideways_cost_weight=0.5,
+      ctrl_cost_weight=0.07,
+      sideways_cost_weight=0.05,
       sideways_body_cost=0.5,
       healthy_reward=1.0,
       terminate_when_unhealthy=True,
