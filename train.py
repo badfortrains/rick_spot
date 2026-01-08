@@ -90,12 +90,12 @@ class Biped(PipelineEnv):
       sideways_body_cost=0.5,
       healthy_reward=2.0,
       terminate_when_unhealthy=False,
-      healthy_z_range=(0.1, 0.25), 
+      healthy_z_range=(0.02, 0.1), 
       reset_noise_scale=1e-2,
       exclude_current_positions_from_observation=True,
       **kwargs,
   ):
-    path = ROOT_RICK_PATH / "assemblyDerived_v8.xml"
+    path = ROOT_RICK_PATH / "assemblyDerived_v9.xml"
     mj_model = mujoco.MjModel.from_xml_path(path.as_posix())
     # mj_model.opt.solver = mujoco.mjtSolver.mjSOL_CG
     # mj_model.opt.iterations = 6
