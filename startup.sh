@@ -31,8 +31,8 @@ source /opt/venv/bin/activate
 pip install --upgrade pip
 
 # --- 5. Download Code ---
-wget https://raw.githubusercontent.com/badfortrains/rick_spot/refs/heads/main/train.py
-wget https://raw.githubusercontent.com/badfortrains/rick_spot/refs/heads/main/requirements.txt
+wget https://raw.githubusercontent.com/badfortrains/rick_spot/refs/heads/reward/train.py
+wget https://raw.githubusercontent.com/badfortrains/rick_spot/refs/heads/reward/requirements.txt
 
 # --- 6. Install Requirements ---
 # Install requirements first
