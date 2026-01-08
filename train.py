@@ -88,7 +88,7 @@ class Biped(PipelineEnv):
       ctrl_cost_weight=0.1,
       sideways_cost_weight=0.5,
       sideways_body_cost=0.2,
-      healthy_reward=20.0,
+      healthy_reward=1.0,
       terminate_when_unhealthy=True,
       healthy_z_range=(0.1, 0.25), 
       reset_noise_scale=1e-2,
@@ -178,7 +178,9 @@ class Biped(PipelineEnv):
     #vel_dir_normalized = vel_2d / (jp.linalg.norm(vel_2d) + 1e-8)
     
     #forward_reward = self._forward_reward_weight * jp.dot(vel_dir_normalized, forward_dir_normalized) * jp.linalg.norm(vel_2d)
-    forward_reward = self._forward_reward_weight * jp.exp(-5000.0 * (forward_velocity - target_speed)**2)
+    # New (Laplace/Absolute): Strong gradient at 0
+    # The 'sigma' divisor controls width. 0.02 means if you are 0.02 m/s away, reward drops to ~36%
+    forward_reward = self._forward_reward_weight * jp.exp(-jp.abs(forward_velocity - target_speed) / 0.02)
     sideways_speed = jp.dot(vel_2d, sideways_dir_normalized)
     sideways_cost = self._sideways_cost_weight * jp.abs(sideways_speed)
 
