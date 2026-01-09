@@ -88,7 +88,7 @@ class Biped(PipelineEnv):
       ctrl_cost_weight=0.07,
       sideways_cost_weight=0.05,
       sideways_body_cost=0.5,
-      healthy_reward=3.0,
+      healthy_reward=5.0,
       terminate_when_unhealthy=True,
       healthy_z_range=(0.02, 0.1), 
       reset_noise_scale=1e-2,
@@ -326,7 +326,7 @@ train_fn = functools.partial(
     episode_length=1000, 
     normalize_observations=True, 
     action_repeat=1,
-    unroll_length=20,       # Lower unroll length slightly for unstable dynamics
+    unroll_length=10,       # Lower unroll length slightly for unstable dynamics
     num_minibatches=32, 
     num_updates_per_batch=8,
     discounting=0.97,       # Lower discount (0.99 -> 0.97) focuses on immediate survival
