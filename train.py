@@ -106,7 +106,7 @@ class Biped(PipelineEnv):
 
     sys = mjcf.load_model(mj_model)
 
-    physics_steps_per_control_step = 5
+    physics_steps_per_control_step = 2
     kwargs['n_frames'] = kwargs.get(
         'n_frames', physics_steps_per_control_step)
     kwargs['backend'] = 'mjx'
@@ -318,8 +318,8 @@ train_fn = functools.partial(
     ppo.train, 
     num_timesteps=100_000_000, 
     num_evals=30, 
-    reward_scaling=1.0,     # Changed from 0.1 (0.1 is very low for standard PPO)
-    episode_length=1000, 
+    reward_scaling=0.1,     # Changed from 0.1 (0.1 is very low for standard PPO)
+    episode_length=2500,
     normalize_observations=True, 
     action_repeat=1,
     unroll_length=10,       # Lower unroll length slightly for unstable dynamics
