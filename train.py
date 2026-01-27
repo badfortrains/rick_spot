@@ -84,7 +84,7 @@ jax.config.update('jax_default_matmul_precision', 'high')
 class Biped(PipelineEnv):
   def __init__(
       self,
-      forward_reward_weight=1.0,
+      forward_reward_weight=2.0,
       ctrl_cost_weight=0.07,
       sideways_cost_weight=0.05,
       sideways_body_cost=0.5,
