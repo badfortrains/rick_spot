@@ -30,9 +30,11 @@ source /opt/venv/bin/activate
 # --- 4. Setup Python Environment (Inside venv) ---
 pip install --upgrade pip
 
-# --- 5. Download Code ---
-wget https://raw.githubusercontent.com/badfortrains/rick_spot/refs/heads/reward/train.py
-wget https://raw.githubusercontent.com/badfortrains/rick_spot/refs/heads/reward/requirements.txt
+echo "Cloning repository..."
+git clone -b reward https://github.com/badfortrains/rick_spot.git /opt/rick_spot
+
+# Navigate into the cloned directory so requirements and scripts are found
+cd /opt/rick_spot
 
 # --- 6. Install Requirements ---
 # Install requirements first
