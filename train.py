@@ -83,17 +83,17 @@ jax.config.update('jax_default_matmul_precision', 'high')
 # 4. Define Environment (Your Biped Class)
 class Biped(PipelineEnv):
   def __init__(
-      self,
-      forward_reward_weight=2.0,
-      ctrl_cost_weight=0.07,
-      sideways_cost_weight=0.05,
-      sideways_body_cost=0.5,
-      healthy_reward=5.0,
-      terminate_when_unhealthy=True,
-      healthy_z_range=(0.02, 0.1), 
-      reset_noise_scale=1e-2,
-      exclude_current_positions_from_observation=True,
-      **kwargs,
+    self,
+    forward_reward_weight=1.0,
+    ctrl_cost_weight=0.01,
+    sideways_cost_weight=0.05,
+    sideways_body_cost=0.5,
+    healthy_reward=1.0,
+    terminate_when_unhealthy=True,
+    healthy_z_range=(0.02, 0.15),
+    reset_noise_scale=0.002,
+    exclude_current_positions_from_observation=True,
+    **kwargs,
   ):
     path = ROOT_RICK_PATH / "assemblyDerived_v9.xml"
     mj_model = mujoco.MjModel.from_xml_path(path.as_posix())
@@ -156,53 +156,49 @@ class Biped(PipelineEnv):
   def step(self, state: State, action: jp.ndarray) -> State:
     data0 = state.pipeline_state
     data = self.pipeline_step(data0, action)
+    
+    # Kinematics
     com_before = data0.subtree_com[self._body_idx]
     com_after = data.subtree_com[self._body_idx]
     velocity = (com_after - com_before) / self.dt
     vel_2d = velocity[:2] 
+    
+    # Directions
     forward_dir = jp.array([0.0, -1.0]) 
     sideways_dir = jp.array([1.0, 0.0])
 
-    body_quat = data.xquat[self._body_idx]
-    body_sideways_dir = math.rotate(jp.array([1.0, 0.0, 0.0]), body_quat)
-    body_sideways_dir = body_sideways_dir[:2]
-    body_sideways_dir_normalized = body_sideways_dir/ (jp.linalg.norm(body_sideways_dir) + 1e-8)
-    body_sideways_speed = jp.dot(vel_2d, body_sideways_dir_normalized)
-    body_cost = self._sideways_body_cost * jp.abs(body_sideways_speed)
+    # 1. Linear Forward Reward (Easier to learn than exponential)
+    # Just reward going forward. 
+    forward_velocity = jp.dot(vel_2d, forward_dir)
+    forward_reward = self._forward_reward_weight * forward_velocity
 
-    sideways_dir_normalized = sideways_dir/ (jp.linalg.norm(sideways_dir) + 1e-8)
-    forward_dir_normalized = forward_dir / (jp.linalg.norm(forward_dir) + 1e-8)
-    forward_velocity = jp.dot(vel_2d, forward_dir_normalized)
-    # Define a target speed (meters/s)
-    target_speed = 0.04
-    #vel_dir_normalized = vel_2d / (jp.linalg.norm(vel_2d) + 1e-8)
-    
-    #forward_reward = self._forward_reward_weight * jp.dot(vel_dir_normalized, forward_dir_normalized) * jp.linalg.norm(vel_2d)
-    # New (Laplace/Absolute): Strong gradient at 0
-    # The 'sigma' divisor controls width. 0.02 means if you are 0.02 m/s away, reward drops to ~36%
-    forward_reward = self._forward_reward_weight * jp.exp(-jp.abs(forward_velocity - target_speed) / 0.02)
-    sideways_speed = jp.dot(vel_2d, sideways_dir_normalized)
+    # Sideways penalties
+    sideways_speed = jp.dot(vel_2d, sideways_dir)
     sideways_cost = self._sideways_cost_weight * jp.abs(sideways_speed)
 
+    # Healthy Check
     min_z, max_z = self._healthy_z_range
     is_healthy = jp.where(data.q[2] < min_z, 0.0, 1.0)
     is_healthy = jp.where(data.q[2] > max_z, 0.0, is_healthy)
+    
+    # Survival Reward
     healthy_reward = self._healthy_reward if self._terminate_when_unhealthy else self._healthy_reward * is_healthy
 
+    # Control Cost
     joint_pos_delta = data.qpos[7:] - data0.qpos[7:]
     ctrl_cost = self._ctrl_cost_weight * jp.sum(jp.square(joint_pos_delta))
 
-    reward = forward_reward + healthy_reward - ctrl_cost - sideways_cost - body_cost
+    # Total Reward
+    reward = forward_reward + healthy_reward - ctrl_cost - sideways_cost
+    
     done = 1.0 - is_healthy if self._terminate_when_unhealthy else 0.0
+    
     obs = self._get_obs(data, action)
     state.metrics.update(
         forward_reward=forward_reward,
         reward_linvel=forward_reward,
         reward_quadctrl=-ctrl_cost,
         reward_alive=healthy_reward,
-        x_position=com_after[0],
-        y_position=com_after[1],
-        distance_from_origin=jp.linalg.norm(com_after),
         x_velocity=velocity[0],
         y_velocity=velocity[1],
     )
@@ -329,9 +325,9 @@ train_fn = functools.partial(
     unroll_length=10,       # Lower unroll length slightly for unstable dynamics
     num_minibatches=32, 
     num_updates_per_batch=8,
-    discounting=0.97,       # Lower discount (0.99 -> 0.97) focuses on immediate survival
+    discounting=0.99, 
     learning_rate=3e-4, 
-    entropy_cost=0.01,      # Increased exploration
+    entropy_cost=1e-3, 
     num_envs=4096,
     batch_size=1024, 
     seed=0, 
