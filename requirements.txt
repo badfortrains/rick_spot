@@ -5,4 +5,5 @@ mediapy
 etils
 matplotlib
 ml_collections
+imageio[ffmpeg]
 # We will install JAX specifically for CUDA in the startup script

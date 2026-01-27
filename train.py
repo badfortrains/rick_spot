@@ -5,6 +5,7 @@ import functools
 import shutil
 from datetime import datetime
 from typing import Any, Dict, Sequence, Tuple, Union
+import imageio
 import jax
 
 # --- CONFIGURATION ---
@@ -67,7 +68,7 @@ from mujoco import mjx
 from brax import envs
 from brax import math
 from brax.envs.base import PipelineEnv, State
-from brax.io import mjcf
+from brax.io import mjcf, image
 from brax.training.agents.ppo import train as ppo
 from brax.training.agents.ppo import networks as ppo_networks
 from brax.training.agents.ppo import checkpoint
@@ -88,7 +89,7 @@ class Biped(PipelineEnv):
     ctrl_cost_weight=0.01,
     sideways_cost_weight=0.05,
     sideways_body_cost=0.5,
-    healthy_reward=10.0,
+    healthy_reward=20.0,
     terminate_when_unhealthy=True,
     healthy_z_range=(0.02, 0.15),
     reset_noise_scale=0.002,
@@ -216,6 +217,7 @@ envs.register_environment('biped', Biped)
 print("Initializing Environment...")
 env_name = 'biped'
 env = envs.get_environment(env_name)
+eval_env = envs.get_environment(env_name)
 
 # Local temporary path
 ckpt_path = epath.Path('/tmp/rick_v2_checkpoints')
@@ -228,19 +230,80 @@ config = checkpoint.network_config(
     ppo_networks.make_ppo_networks
 )
 
+
+def render_video(params, make_policy, step_count):
+    """Generates a rollout and renders it to an MP4 file."""
+    print(f"Rendering video for step {step_count}...")
+    
+    # Create inference function from params
+    inference_fn = make_policy(params)
+    jit_inference_fn = jax.jit(inference_fn)
+    jit_reset = jax.jit(eval_env.reset)
+    jit_step = jax.jit(eval_env.step)
+
+    # Run Rollout (Simulate 500 steps = approx 2-4 seconds)
+    rng = jax.random.PRNGKey(0)
+    state = jit_reset(rng)
+    
+    states = []
+    for _ in range(500):
+        # Store state for rendering
+        states.append(state.pipeline_state)
+        
+        # Inference
+        act_rng, rng = jax.random.split(rng)
+        action, _ = jit_inference_fn(state.obs, act_rng)
+        
+        # Step
+        state = jit_step(state, action)
+
+        if state.done:
+            break
+
+    # Render Frames
+    # We use brax.io.image to render the list of MJX states
+    # fmt='array' returns numpy arrays (H, W, 3) suitable for video
+    frames = eval_env.render(states, width=320, height=240, camera='track')
+
+    # Save to MP4
+    video_filename = f'{step_count}.mp4'
+    local_video_path = ckpt_path / video_filename
+    
+    # Save video at 30 FPS
+    imageio.mimsave(str(local_video_path), frames, fps=30)
+    print(f"Video saved locally to {local_video_path}")
+    
+    return local_video_path
+
 def policy_params_fn(current_step, make_policy, params):
-  # Save locally
   path = ckpt_path / f'{current_step}'
   checkpoint.save(path, current_step, params, config)
   print(f"Saved checkpoint to {path}")
   
-  # Sync to GCS immediately (Critical for Spot Instances)
+  # 2. Render and Save Video Locally
   try:
+      local_vid_path = render_video(params, make_policy, current_step)
+  except Exception as e:
+      print(f"Video rendering failed: {e}")
+      local_vid_path = None
+
+  # 3. Sync everything to GCS
+  try:
+      # Upload Checkpoint
       subprocess.run(
           ['gsutil', '-m', 'cp', '-r', str(path), GCS_BUCKET_URI], 
           check=True
       )
-      print(f"Synced {path} to {GCS_BUCKET_URI}")
+      
+      # Upload Video (if it was generated)
+      if local_vid_path:
+          subprocess.run(
+              ['gsutil', 'cp', str(local_vid_path), GCS_BUCKET_URI],
+              check=True
+          )
+          print(f"Synced video to {GCS_BUCKET_URI}/{local_vid_path.name}")
+          
+      print(f"Synced checkpoint to {GCS_BUCKET_URI}")
   except Exception as e:
       print(f"Failed to sync to GCS: {e}")
 
@@ -316,9 +379,9 @@ start_time = datetime.now()
 
 train_fn = functools.partial(
     ppo.train, 
-    num_timesteps=100_000_000, 
+    num_timesteps=40_000_000, 
     num_evals=30, 
-    reward_scaling=0.1,     # Changed from 0.1 (0.1 is very low for standard PPO)
+    reward_scaling=0.1,
     episode_length=2500,
     normalize_observations=True, 
     action_repeat=1,
