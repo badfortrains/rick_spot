@@ -206,10 +206,34 @@ class Biped(PipelineEnv):
     return state.replace(pipeline_state=data, obs=obs, reward=reward, done=done)
 
   def _get_obs(self, data: jax.numpy.ndarray, action: jp.ndarray) -> jp.ndarray:
-    position = data.qpos
-    if self._exclude_current_positions_from_observation:
-      position = position[2:]
-    return jp.concatenate([position, data.qvel, data.qfrc_actuator])
+    """
+    Observation function for Sim-to-Real transfer with MG90S servos.
+    
+    Inputs:
+    - data: The MuJoCo data structure containing sensor readings.
+    - action: The PREVIOUS action sent to the motors (used as position proxy).
+    """
+
+    # 1. Get Sensor Data
+    # In your XML, the order is: Gyro (3) -> Accel (3) -> Orientation (4)
+    # data.sensordata is a flat array of all sensor values.
+    
+    gyro_readings = data.sensordata[0:3]   # Angular velocity (X, Y, Z)
+    accel_readings = data.sensordata[3:6]  # Linear acceleration (X, Y, Z)
+    orientation = data.sensordata[6:10]    # Quaternion (w, x, y, z)
+
+    # 2. Use "Action" as a proxy for Joint Position
+    # Real MG90S servos don't give feedback. We assume the servo 
+    # effectively reached the target position from the last time step.
+    current_joint_pos_proxy = action
+
+    # 3. Concatenate into a single observation vector
+    return jp.concatenate([
+        current_joint_pos_proxy, # Replaces data.qpos
+        orientation,             # Replaces data.qpos (root orientation)
+        gyro_readings,           # Replaces data.qvel
+        accel_readings           # Extra stability data
+    ])
 
 envs.register_environment('biped', Biped)
 
