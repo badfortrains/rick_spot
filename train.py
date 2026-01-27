@@ -89,7 +89,7 @@ class Biped(PipelineEnv):
     ctrl_cost_weight=0.01,
     sideways_cost_weight=0.05,
     sideways_body_cost=0.5,
-    healthy_reward=20.0,
+    healthy_reward=5.0,
     terminate_when_unhealthy=True,
     healthy_z_range=(0.02, 0.15),
     reset_noise_scale=0.002,
@@ -379,7 +379,7 @@ start_time = datetime.now()
 
 train_fn = functools.partial(
     ppo.train, 
-    num_timesteps=40_000_000, 
+    num_timesteps=100_000_000, 
     num_evals=30, 
     reward_scaling=0.1,
     episode_length=2500,
