@@ -114,6 +114,9 @@ class Biped(PipelineEnv):
 
     super().__init__(sys, **kwargs)
 
+    self.history_len = 5
+    self.action_dim = 6
+    self.action_history = jp.zeros((self.history_len, self.action_dim))
     self._forward_reward_weight = forward_reward_weight
     self._ctrl_cost_weight = ctrl_cost_weight
     self._healthy_reward = healthy_reward
@@ -155,6 +158,11 @@ class Biped(PipelineEnv):
     return State(pipeline_state=data, obs=obs, reward=reward, done=done, metrics=metrics)
 
   def step(self, state: State, action: jp.ndarray) -> State:
+    # 1. Shift everything "left" (discard oldest action)
+    self.action_history = jp.roll(self.action_history, shift=-1, axis=0)
+    # 2. Update the last row with the NEW action
+    self.action_history = self.action_history.at[-1].set(action)
+
     data0 = state.pipeline_state
     data = self.pipeline_step(data0, action)
     
@@ -222,14 +230,14 @@ class Biped(PipelineEnv):
     accel_readings = data.sensordata[3:6]  # Linear acceleration (X, Y, Z)
     orientation = data.sensordata[6:10]    # Quaternion (w, x, y, z)
 
-    # 2. Use "Action" as a proxy for Joint Position
-    # Real MG90S servos don't give feedback. We assume the servo 
-    # effectively reached the target position from the last time step.
-    current_joint_pos_proxy = action
+    # 2. Get Action History 
+    # Flatten the (5, 6) history array into a single 1D vector (size 30)
+    # This gives the network the "context" of recent commands.
+    history_flat = self.action_history.flatten()
 
     # 3. Concatenate into a single observation vector
     return jp.concatenate([
-        current_joint_pos_proxy, # Replaces data.qpos
+        history_flat,            # Replaces data.qpos
         orientation,             # Replaces data.qpos (root orientation)
         gyro_readings,           # Replaces data.qvel
         accel_readings           # Extra stability data
