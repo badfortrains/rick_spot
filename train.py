@@ -230,7 +230,7 @@ class Biped(PipelineEnv):
         obs=obs, 
         reward=reward, 
         done=done, 
-        info={'action_history': new_history}
+        info={**state.info, 'action_history': new_history}
     )
 
   def _get_obs(self, data: jax.numpy.ndarray, action: jp.ndarray, action_history: jp.ndarray) -> jp.ndarray:
