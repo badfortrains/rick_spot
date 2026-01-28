@@ -81,7 +81,6 @@ if not os.path.exists('rick_v2'):
 ROOT_RICK_PATH = epath.Path('rick_v2')
 jax.config.update('jax_default_matmul_precision', 'high')
 
-# 4. Define Environment (Your Biped Class)
 class Biped(PipelineEnv):
   def __init__(
     self,
@@ -89,6 +88,7 @@ class Biped(PipelineEnv):
     ctrl_cost_weight=0.01,
     sideways_cost_weight=0.05,
     sideways_body_cost=0.5,
+    orientation_cost_weight=1.0,
     healthy_reward=1.0,
     terminate_when_unhealthy=True,
     healthy_z_range=(0.02, 0.15),
@@ -115,6 +115,7 @@ class Biped(PipelineEnv):
     self.action_dim = 6
     self._forward_reward_weight = forward_reward_weight
     self._ctrl_cost_weight = ctrl_cost_weight
+    self._orientation_cost_weight = orientation_cost_weight
     self._healthy_reward = healthy_reward
     self._terminate_when_unhealthy = terminate_when_unhealthy
     self._healthy_z_range = healthy_z_range
@@ -139,10 +140,7 @@ class Biped(PipelineEnv):
     )
     data = self.pipeline_init(qpos, qvel)
 
-    # Initialize history here
     action_history = jp.zeros((self.history_len, self.action_dim))
-    
-    # Pass history to get_obs
     obs = self._get_obs(data, jp.zeros(self.sys.nu), action_history)
     
     reward, done, zero = jp.zeros(3)
@@ -150,6 +148,7 @@ class Biped(PipelineEnv):
         'forward_reward': zero,
         'reward_linvel': zero,
         'reward_quadctrl': zero,
+        'reward_orientation': zero,
         'reward_alive': zero,
         'x_position': zero,
         'y_position': zero,
@@ -158,7 +157,6 @@ class Biped(PipelineEnv):
         'y_velocity': zero,
     }
     
-    # Store history in state.info so it persists to the next step
     return State(
         pipeline_state=data, 
         obs=obs, 
@@ -169,10 +167,7 @@ class Biped(PipelineEnv):
     )
 
   def step(self, state: State, action: jp.ndarray) -> State:
-    # 1. Retrieve history from previous state
     current_history = state.info['action_history']
-
-    # 2. Update history logic
     new_history = jp.roll(current_history, shift=-1, axis=0)
     new_history = new_history.at[-1].set(action)
 
@@ -185,7 +180,6 @@ class Biped(PipelineEnv):
     velocity = (com_after - com_before) / self.dt
     vel_2d = velocity[:2] 
     
-    # Directions
     forward_dir = jp.array([0.0, -1.0]) 
     sideways_dir = jp.array([1.0, 0.0])
 
@@ -197,12 +191,22 @@ class Biped(PipelineEnv):
     sideways_speed = jp.dot(vel_2d, sideways_dir)
     sideways_cost = self._sideways_cost_weight * jp.abs(sideways_speed)
 
+    # The root quaternion is usually at indices 3:7 in qpos (x,y,z, w,x,y,z)
+    root_quat = data.q[3:7]
+    
+    # We want the robot's local "UP" vector (0,0,1) to align with World "UP" (0,0,1)
+    # Rotate local UP by the current orientation
+    projected_up = math.rotate(jp.array([0., 0., 1.]), root_quat)
+    
+    # If perfect, projected_up is [0, 0, 1].
+    # We penalize any value in the X or Y components.
+    tilt_cost = self._orientation_cost_weight * jp.sum(jp.square(projected_up[:2]))
+
     # Healthy Check
     min_z, max_z = self._healthy_z_range
     is_healthy = jp.where(data.q[2] < min_z, 0.0, 1.0)
     is_healthy = jp.where(data.q[2] > max_z, 0.0, is_healthy)
     
-    # Survival Reward
     healthy_reward = self._healthy_reward if self._terminate_when_unhealthy else self._healthy_reward * is_healthy
 
     # Control Cost
@@ -210,7 +214,7 @@ class Biped(PipelineEnv):
     ctrl_cost = self._ctrl_cost_weight * jp.sum(jp.square(joint_pos_delta))
 
     # Total Reward
-    reward = forward_reward + healthy_reward - ctrl_cost - sideways_cost
+    reward = forward_reward + healthy_reward - ctrl_cost - sideways_cost - tilt_cost
     
     done = 1.0 - is_healthy if self._terminate_when_unhealthy else 0.0
     
@@ -220,6 +224,7 @@ class Biped(PipelineEnv):
         forward_reward=forward_reward,
         reward_linvel=forward_reward,
         reward_quadctrl=-ctrl_cost,
+        reward_orientation=-tilt_cost,
         reward_alive=healthy_reward,
         x_velocity=velocity[0],
         y_velocity=velocity[1],
@@ -234,18 +239,15 @@ class Biped(PipelineEnv):
     )
 
   def _get_obs(self, data: jax.numpy.ndarray, action: jp.ndarray, action_history: jp.ndarray) -> jp.ndarray:
-    """
-    Observation function for Sim-to-Real transfer with MG90S servos.
-    """
     # 1. Get Sensor Data
-    gyro_readings = data.sensordata[0:3]   # Angular velocity (X, Y, Z)
-    accel_readings = data.sensordata[3:6]  # Linear acceleration (X, Y, Z)
-    orientation = data.sensordata[6:10]    # Quaternion (w, x, y, z)
+    gyro_readings = data.sensordata[0:3]
+    accel_readings = data.sensordata[3:6]
+    orientation = data.sensordata[6:10]
 
     # 2. Get Action History 
     history_flat = action_history.flatten()
 
-    # 3. Concatenate into a single observation vector
+    # 3. Concatenate
     return jp.concatenate([
         history_flat,            
         orientation,             
