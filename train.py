@@ -98,11 +98,8 @@ class Biped(PipelineEnv):
   ):
     path = ROOT_RICK_PATH / "assemblyDerived_v9.xml"
     mj_model = mujoco.MjModel.from_xml_path(path.as_posix())
-    # mj_model.opt.solver = mujoco.mjtSolver.mjSOL_CG
-    # mj_model.opt.iterations = 6
-    # mj_model.opt.ls_iterations = 6
     mj_model.opt.solver = mujoco.mjtSolver.mjSOL_NEWTON
-    mj_model.opt.iterations = 10 # Newton converges fast, 10 is usually plenty
+    mj_model.opt.iterations = 10 
     mj_model.opt.ls_iterations = 6
 
     sys = mjcf.load_model(mj_model)
@@ -116,7 +113,6 @@ class Biped(PipelineEnv):
 
     self.history_len = 5
     self.action_dim = 6
-    self.action_history = jp.zeros((self.history_len, self.action_dim))
     self._forward_reward_weight = forward_reward_weight
     self._ctrl_cost_weight = ctrl_cost_weight
     self._healthy_reward = healthy_reward
@@ -142,7 +138,13 @@ class Biped(PipelineEnv):
         rng2, (self.sys.nv,), minval=low, maxval=hi
     )
     data = self.pipeline_init(qpos, qvel)
-    obs = self._get_obs(data, jp.zeros(self.sys.nu))
+
+    # Initialize history here
+    action_history = jp.zeros((self.history_len, self.action_dim))
+    
+    # Pass history to get_obs
+    obs = self._get_obs(data, jp.zeros(self.sys.nu), action_history)
+    
     reward, done, zero = jp.zeros(3)
     metrics = {
         'forward_reward': zero,
@@ -155,13 +157,24 @@ class Biped(PipelineEnv):
         'x_velocity': zero,
         'y_velocity': zero,
     }
-    return State(pipeline_state=data, obs=obs, reward=reward, done=done, metrics=metrics)
+    
+    # Store history in state.info so it persists to the next step
+    return State(
+        pipeline_state=data, 
+        obs=obs, 
+        reward=reward, 
+        done=done, 
+        metrics=metrics, 
+        info={'action_history': action_history}
+    )
 
   def step(self, state: State, action: jp.ndarray) -> State:
-    # 1. Shift everything "left" (discard oldest action)
-    self.action_history = jp.roll(self.action_history, shift=-1, axis=0)
-    # 2. Update the last row with the NEW action
-    self.action_history = self.action_history.at[-1].set(action)
+    # 1. Retrieve history from previous state
+    current_history = state.info['action_history']
+
+    # 2. Update history logic
+    new_history = jp.roll(current_history, shift=-1, axis=0)
+    new_history = new_history.at[-1].set(action)
 
     data0 = state.pipeline_state
     data = self.pipeline_step(data0, action)
@@ -176,8 +189,7 @@ class Biped(PipelineEnv):
     forward_dir = jp.array([0.0, -1.0]) 
     sideways_dir = jp.array([1.0, 0.0])
 
-    # 1. Linear Forward Reward (Easier to learn than exponential)
-    # Just reward going forward. 
+    # 1. Linear Forward Reward
     forward_velocity = jp.dot(vel_2d, forward_dir)
     forward_reward = self._forward_reward_weight * forward_velocity
 
@@ -202,7 +214,8 @@ class Biped(PipelineEnv):
     
     done = 1.0 - is_healthy if self._terminate_when_unhealthy else 0.0
     
-    obs = self._get_obs(data, action)
+    obs = self._get_obs(data, action, new_history)
+    
     state.metrics.update(
         forward_reward=forward_reward,
         reward_linvel=forward_reward,
@@ -211,36 +224,33 @@ class Biped(PipelineEnv):
         x_velocity=velocity[0],
         y_velocity=velocity[1],
     )
-    return state.replace(pipeline_state=data, obs=obs, reward=reward, done=done)
+    
+    return state.replace(
+        pipeline_state=data, 
+        obs=obs, 
+        reward=reward, 
+        done=done, 
+        info={'action_history': new_history}
+    )
 
-  def _get_obs(self, data: jax.numpy.ndarray, action: jp.ndarray) -> jp.ndarray:
+  def _get_obs(self, data: jax.numpy.ndarray, action: jp.ndarray, action_history: jp.ndarray) -> jp.ndarray:
     """
     Observation function for Sim-to-Real transfer with MG90S servos.
-    
-    Inputs:
-    - data: The MuJoCo data structure containing sensor readings.
-    - action: The PREVIOUS action sent to the motors (used as position proxy).
     """
-
     # 1. Get Sensor Data
-    # In your XML, the order is: Gyro (3) -> Accel (3) -> Orientation (4)
-    # data.sensordata is a flat array of all sensor values.
-    
     gyro_readings = data.sensordata[0:3]   # Angular velocity (X, Y, Z)
     accel_readings = data.sensordata[3:6]  # Linear acceleration (X, Y, Z)
     orientation = data.sensordata[6:10]    # Quaternion (w, x, y, z)
 
     # 2. Get Action History 
-    # Flatten the (5, 6) history array into a single 1D vector (size 30)
-    # This gives the network the "context" of recent commands.
-    history_flat = self.action_history.flatten()
+    history_flat = action_history.flatten()
 
     # 3. Concatenate into a single observation vector
     return jp.concatenate([
-        history_flat,            # Replaces data.qpos
-        orientation,             # Replaces data.qpos (root orientation)
-        gyro_readings,           # Replaces data.qvel
-        accel_readings           # Extra stability data
+        history_flat,            
+        orientation,             
+        gyro_readings,           
+        accel_readings           
     ])
 
 envs.register_environment('biped', Biped)
