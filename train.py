@@ -122,8 +122,8 @@ class Biped(PipelineEnv):
     self._terminate_when_unhealthy = terminate_when_unhealthy
     self._healthy_z_range = healthy_z_range
     self._reset_noise_scale = reset_noise_scale
-    self._action_noise_scale = action_noise_scale # Store scale
-    self._obs_noise_scale = obs_noise_scale       # Store scale
+    self._action_noise_scale = action_noise_scale 
+    self._obs_noise_scale = obs_noise_scale       
     self._exclude_current_positions_from_observation = (
         exclude_current_positions_from_observation
     )
@@ -134,9 +134,6 @@ class Biped(PipelineEnv):
     self._sideways_body_cost = sideways_body_cost
 
   def reset(self, rng: jp.ndarray) -> State:
-    # We split the incoming RNG: 
-    # rng -> used for randomizing initial positions
-    # step_key -> stored in state.info to be used in the first 'step' call
     rng, rng1, rng2, step_key = jax.random.split(rng, 4)
     
     low, hi = -self._reset_noise_scale, self._reset_noise_scale
@@ -150,8 +147,6 @@ class Biped(PipelineEnv):
 
     action_history = jp.zeros((self.history_len, self.action_dim))
     
-    # Initial observation (we pass step_key to add noise immediately if desired, 
-    # or just zeros for deterministic first frame. Here we use rng for initial obs noise)
     obs_key, _ = jax.random.split(step_key)
     obs = self._get_obs(data, jp.zeros(self.sys.nu), action_history, obs_key)
     
@@ -177,12 +172,11 @@ class Biped(PipelineEnv):
         metrics=metrics, 
         info={
             'action_history': action_history,
-            'rng': step_key  # <--- CRITICAL: Carry the RNG key in info
+            'rng': step_key 
         }
     )
 
   def step(self, state: State, action: jp.ndarray) -> State:
-    # 1. Retrieve and Split RNG (as discussed in previous step)
     rng = state.info['rng']
     rng, rng_act, rng_obs = jax.random.split(rng, 3)
 
@@ -190,25 +184,21 @@ class Biped(PipelineEnv):
     noise = jax.random.normal(rng_act, action.shape) * self._action_noise_scale
     noisy_action = jp.clip(action + noise, -1.0, 1.0)
 
-    # Map [-1, 1] to the actuator limits (e.g., [-1.57, 1.57])
-    # self.sys.actuator_ctrlrange is shape (nu, 2)
+    # Map to actuator limits
     ctrl_min = self.sys.actuator_ctrlrange[:, 0]
     ctrl_max = self.sys.actuator_ctrlrange[:, 1]
-    
-    # Linear mapping: action * scale + offset
     action_scale = (ctrl_max - ctrl_min) / 2.0
     action_offset = (ctrl_max + ctrl_min) / 2.0
-    
     scaled_action = noisy_action * action_scale + action_offset
 
-    # Update history with the NORMALIZED action (what the agent "saw/did")
+    # Update history
     current_history = state.info['action_history']
     new_history = jp.roll(current_history, shift=-1, axis=0)
     new_history = new_history.at[-1].set(noisy_action) 
 
     data0 = state.pipeline_state
     
-    # 3. Step physics with SCALED action
+    # Step physics
     data = self.pipeline_step(data0, scaled_action)
     
     # Kinematics
@@ -240,7 +230,7 @@ class Biped(PipelineEnv):
     
     healthy_reward = self._healthy_reward if self._terminate_when_unhealthy else self._healthy_reward * is_healthy
 
-    # Control Cost (calculated on the noisy action actually applied)
+    # Control Cost 
     joint_pos_delta = data.qpos[7:] - data0.qpos[7:]
     ctrl_cost = self._ctrl_cost_weight * jp.sum(jp.square(joint_pos_delta))
 
@@ -249,7 +239,7 @@ class Biped(PipelineEnv):
     
     done = 1.0 - is_healthy if self._terminate_when_unhealthy else 0.0
     
-    # 4. Get Observation with Observation Noise
+    # Get Observation
     obs = self._get_obs(data, noisy_action, new_history, rng_obs)
     
     state.metrics.update(
@@ -270,25 +260,33 @@ class Biped(PipelineEnv):
         info={
             **state.info, 
             'action_history': new_history,
-            'rng': rng # <--- Update the stored RNG for the next step
+            'rng': rng 
         }
     )
 
   def _get_obs(self, data: jax.numpy.ndarray, action: jp.ndarray, action_history: jp.ndarray, rng: jp.ndarray) -> jp.ndarray:
     # 1. Get Sensor Data
+    # Assuming the first sensors in your XML are Gyro and Accel
     gyro_readings = data.sensordata[0:3]
     accel_readings = data.sensordata[3:6]
-    orientation = data.sensordata[6:10]
+    
+    # Compute Gravity Vector instead of reading Quaternion 
+    # We get the robot's actual orientation from the system state (q[3:7] is standard for root quat)
+    root_rot = data.q[3:7]
+    
+    # We want the gravity vector [0, 0, -1] in the BODY frame.
+    # To do this, we rotate global gravity by the inverse of the body orientation.
+    inv_root_rot = math.quat_inv(root_rot)
+    gravity_vec = math.rotate(jp.array([0.0, 0.0, -1.0]), inv_root_rot)
 
     # 2. Add Observation Noise
-    # We split the rng to add independent noise to different sensors if needed,
-    # or just use one large normal vector.
-    flat_sensor_dim = 3 + 3 + 4 # gyro + accel + orientation
+    # Gyro (3) + Accel (3) + GravityVec (3) = 9 total
+    flat_sensor_dim = 3 + 3 + 3 
     noise = jax.random.normal(rng, (flat_sensor_dim,)) * self._obs_noise_scale
     
     gyro_readings += noise[0:3]
     accel_readings += noise[3:6]
-    orientation += noise[6:10]
+    gravity_vec += noise[6:9]
 
     # 3. Get Action History 
     history_flat = action_history.flatten()
@@ -296,7 +294,7 @@ class Biped(PipelineEnv):
     # 4. Concatenate
     return jp.concatenate([
         history_flat,            
-        orientation,             
+        gravity_vec,      
         gyro_readings,           
         accel_readings           
     ])
@@ -351,8 +349,6 @@ def render_video(params, make_policy, step_count):
             break
 
     # Render Frames
-    # We use brax.io.image to render the list of MJX states
-    # fmt='array' returns numpy arrays (H, W, 3) suitable for video
     frames = eval_env.render(states, width=320, height=240, camera='track')
 
     # Save to MP4
