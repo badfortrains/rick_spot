@@ -93,6 +93,8 @@ class Biped(PipelineEnv):
     terminate_when_unhealthy=True,
     healthy_z_range=(0.02, 0.15),
     reset_noise_scale=0.002,
+    action_noise_scale=0.02,  # Noise added to motor commands
+    obs_noise_scale=0.01,     # Noise added to sensor readings
     exclude_current_positions_from_observation=True,
     **kwargs,
   ):
@@ -120,6 +122,8 @@ class Biped(PipelineEnv):
     self._terminate_when_unhealthy = terminate_when_unhealthy
     self._healthy_z_range = healthy_z_range
     self._reset_noise_scale = reset_noise_scale
+    self._action_noise_scale = action_noise_scale # Store scale
+    self._obs_noise_scale = obs_noise_scale       # Store scale
     self._exclude_current_positions_from_observation = (
         exclude_current_positions_from_observation
     )
@@ -130,7 +134,11 @@ class Biped(PipelineEnv):
     self._sideways_body_cost = sideways_body_cost
 
   def reset(self, rng: jp.ndarray) -> State:
-    rng, rng1, rng2, rng_goal = jax.random.split(rng, 4)
+    # We split the incoming RNG: 
+    # rng -> used for randomizing initial positions
+    # step_key -> stored in state.info to be used in the first 'step' call
+    rng, rng1, rng2, step_key = jax.random.split(rng, 4)
+    
     low, hi = -self._reset_noise_scale, self._reset_noise_scale
     qpos = self.sys.qpos0 + jax.random.uniform(
         rng1, (self.sys.nq,), minval=low, maxval=hi
@@ -141,7 +149,11 @@ class Biped(PipelineEnv):
     data = self.pipeline_init(qpos, qvel)
 
     action_history = jp.zeros((self.history_len, self.action_dim))
-    obs = self._get_obs(data, jp.zeros(self.sys.nu), action_history)
+    
+    # Initial observation (we pass step_key to add noise immediately if desired, 
+    # or just zeros for deterministic first frame. Here we use rng for initial obs noise)
+    obs_key, _ = jax.random.split(step_key)
+    obs = self._get_obs(data, jp.zeros(self.sys.nu), action_history, obs_key)
     
     reward, done, zero = jp.zeros(3)
     metrics = {
@@ -163,16 +175,41 @@ class Biped(PipelineEnv):
         reward=reward, 
         done=done, 
         metrics=metrics, 
-        info={'action_history': action_history}
+        info={
+            'action_history': action_history,
+            'rng': step_key  # <--- CRITICAL: Carry the RNG key in info
+        }
     )
 
   def step(self, state: State, action: jp.ndarray) -> State:
+    # 1. Retrieve and Split RNG (as discussed in previous step)
+    rng = state.info['rng']
+    rng, rng_act, rng_obs = jax.random.split(rng, 3)
+
+    # 2. Add Noise
+    noise = jax.random.normal(rng_act, action.shape) * self._action_noise_scale
+    noisy_action = jp.clip(action + noise, -1.0, 1.0)
+
+    # Map [-1, 1] to the actuator limits (e.g., [-1.57, 1.57])
+    # self.sys.actuator_ctrlrange is shape (nu, 2)
+    ctrl_min = self.sys.actuator_ctrlrange[:, 0]
+    ctrl_max = self.sys.actuator_ctrlrange[:, 1]
+    
+    # Linear mapping: action * scale + offset
+    action_scale = (ctrl_max - ctrl_min) / 2.0
+    action_offset = (ctrl_max + ctrl_min) / 2.0
+    
+    scaled_action = noisy_action * action_scale + action_offset
+
+    # Update history with the NORMALIZED action (what the agent "saw/did")
     current_history = state.info['action_history']
     new_history = jp.roll(current_history, shift=-1, axis=0)
-    new_history = new_history.at[-1].set(action)
+    new_history = new_history.at[-1].set(noisy_action) 
 
     data0 = state.pipeline_state
-    data = self.pipeline_step(data0, action)
+    
+    # 3. Step physics with SCALED action
+    data = self.pipeline_step(data0, scaled_action)
     
     # Kinematics
     com_before = data0.subtree_com[self._body_idx]
@@ -183,7 +220,7 @@ class Biped(PipelineEnv):
     forward_dir = jp.array([0.0, -1.0]) 
     sideways_dir = jp.array([1.0, 0.0])
 
-    # 1. Linear Forward Reward
+    # Linear Forward Reward
     forward_velocity = jp.dot(vel_2d, forward_dir)
     forward_reward = self._forward_reward_weight * forward_velocity
 
@@ -191,15 +228,9 @@ class Biped(PipelineEnv):
     sideways_speed = jp.dot(vel_2d, sideways_dir)
     sideways_cost = self._sideways_cost_weight * jp.abs(sideways_speed)
 
-    # The root quaternion is usually at indices 3:7 in qpos (x,y,z, w,x,y,z)
+    # Orientation logic
     root_quat = data.q[3:7]
-    
-    # We want the robot's local "UP" vector (0,0,1) to align with World "UP" (0,0,1)
-    # Rotate local UP by the current orientation
     projected_up = math.rotate(jp.array([0., 0., 1.]), root_quat)
-    
-    # If perfect, projected_up is [0, 0, 1].
-    # We penalize any value in the X or Y components.
     tilt_cost = self._orientation_cost_weight * jp.sum(jp.square(projected_up[:2]))
 
     # Healthy Check
@@ -209,7 +240,7 @@ class Biped(PipelineEnv):
     
     healthy_reward = self._healthy_reward if self._terminate_when_unhealthy else self._healthy_reward * is_healthy
 
-    # Control Cost
+    # Control Cost (calculated on the noisy action actually applied)
     joint_pos_delta = data.qpos[7:] - data0.qpos[7:]
     ctrl_cost = self._ctrl_cost_weight * jp.sum(jp.square(joint_pos_delta))
 
@@ -218,7 +249,8 @@ class Biped(PipelineEnv):
     
     done = 1.0 - is_healthy if self._terminate_when_unhealthy else 0.0
     
-    obs = self._get_obs(data, action, new_history)
+    # 4. Get Observation with Observation Noise
+    obs = self._get_obs(data, noisy_action, new_history, rng_obs)
     
     state.metrics.update(
         forward_reward=forward_reward,
@@ -235,19 +267,33 @@ class Biped(PipelineEnv):
         obs=obs, 
         reward=reward, 
         done=done, 
-        info={**state.info, 'action_history': new_history}
+        info={
+            **state.info, 
+            'action_history': new_history,
+            'rng': rng # <--- Update the stored RNG for the next step
+        }
     )
 
-  def _get_obs(self, data: jax.numpy.ndarray, action: jp.ndarray, action_history: jp.ndarray) -> jp.ndarray:
+  def _get_obs(self, data: jax.numpy.ndarray, action: jp.ndarray, action_history: jp.ndarray, rng: jp.ndarray) -> jp.ndarray:
     # 1. Get Sensor Data
     gyro_readings = data.sensordata[0:3]
     accel_readings = data.sensordata[3:6]
     orientation = data.sensordata[6:10]
 
-    # 2. Get Action History 
+    # 2. Add Observation Noise
+    # We split the rng to add independent noise to different sensors if needed,
+    # or just use one large normal vector.
+    flat_sensor_dim = 3 + 3 + 4 # gyro + accel + orientation
+    noise = jax.random.normal(rng, (flat_sensor_dim,)) * self._obs_noise_scale
+    
+    gyro_readings += noise[0:3]
+    accel_readings += noise[3:6]
+    orientation += noise[6:10]
+
+    # 3. Get Action History 
     history_flat = action_history.flatten()
 
-    # 3. Concatenate
+    # 4. Concatenate
     return jp.concatenate([
         history_flat,            
         orientation,             
