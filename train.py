@@ -79,7 +79,6 @@ class Biped(PipelineEnv):
   def __init__(
     self,
     forward_reward_weight=1.0,
-    ctrl_cost_weight=0,
     action_rate_cost_weight=0.02,
     sideways_cost_weight=0.05,
     sideways_body_cost=0.5,
@@ -111,7 +110,6 @@ class Biped(PipelineEnv):
     self.history_len = 5
     self.action_dim = 6
     self._forward_reward_weight = forward_reward_weight
-    self._ctrl_cost_weight = ctrl_cost_weight
     self._action_rate_cost_weight = action_rate_cost_weight
     self._orientation_cost_weight = orientation_cost_weight
     self._healthy_reward = healthy_reward
@@ -136,6 +134,11 @@ class Biped(PipelineEnv):
     qpos = self.sys.qpos0 + jax.random.uniform(
         rng1, (self.sys.nq,), minval=low, maxval=hi
     )
+    
+    # 1. Normalize the quaternion to prevent physics divergence (NaNs)
+    root_quat = qpos[3:7]
+    qpos = qpos.at[3:7].set(root_quat / jp.linalg.norm(root_quat))
+
     qvel = jax.random.uniform(
         rng2, (self.sys.nv,), minval=low, maxval=hi
     )
@@ -143,15 +146,19 @@ class Biped(PipelineEnv):
 
     action_history = jp.zeros((self.history_len, self.action_dim))
     
-    obs_key, _ = jax.random.split(step_key)
-    obs = self._get_obs(data, jp.zeros(self.sys.nu), action_history, obs_key)
+    # 2. Initialize IMU History buffer
+    obs_key, imu_key = jax.random.split(step_key)
+    raw_imu = jp.concatenate([data.sensordata[0:3], data.sensordata[3:6]])
+    noisy_imu = raw_imu + jax.random.normal(imu_key, (6,)) * self._obs_noise_scale
+    imu_history = jp.tile(noisy_imu, (self.history_len, 1))
+    
+    obs = self._get_obs(action_history, imu_history)
     
     reward, done, zero = jp.zeros(3)
     metrics = {
         'forward_reward': zero,
         'reward_linvel': zero,
-        'reward_quadctrl': zero,
-        'reward_action_rate': zero, # Track smoothing penalty
+        'reward_action_rate': zero,
         'reward_orientation': zero,
         'reward_alive': zero,
         'x_position': zero,
@@ -169,6 +176,7 @@ class Biped(PipelineEnv):
         metrics=metrics, 
         info={
             'action_history': action_history,
+            'imu_history': imu_history, # Added IMU history to info state
             'rng': step_key 
         }
     )
@@ -177,7 +185,6 @@ class Biped(PipelineEnv):
     rng = state.info['rng']
     rng, rng_act, rng_obs = jax.random.split(rng, 3)
 
-    # 1. Action Smoothing Cost (Calculate before modifying history)
     current_history = state.info['action_history']
     last_action = current_history[-1]
     action_rate_cost = self._action_rate_cost_weight * jp.sum(jp.square(action - last_action))
@@ -202,6 +209,14 @@ class Biped(PipelineEnv):
     # Step physics
     data = self.pipeline_step(data0, scaled_action)
     
+    # 3. Update IMU History
+    raw_imu = jp.concatenate([data.sensordata[0:3], data.sensordata[3:6]])
+    noisy_imu = raw_imu + jax.random.normal(rng_obs, (6,)) * self._obs_noise_scale
+    
+    current_imu_history = state.info['imu_history']
+    new_imu_history = jp.roll(current_imu_history, shift=-1, axis=0)
+    new_imu_history = new_imu_history.at[-1].set(noisy_imu)
+    
     # Kinematics
     com_before = data0.subtree_com[self._body_idx]
     com_after = data.subtree_com[self._body_idx]
@@ -220,34 +235,28 @@ class Biped(PipelineEnv):
     sideways_cost = self._sideways_cost_weight * jp.abs(sideways_speed)
 
     # Orientation logic
-    root_quat = data.q[3:7]
+    root_quat = data.qpos[3:7]
     projected_up = math.rotate(jp.array([0., 0., 1.]), root_quat)
     tilt_cost = self._orientation_cost_weight * jp.sum(jp.square(projected_up[:2]))
 
     # Healthy Check
     min_z, max_z = self._healthy_z_range
-    is_healthy = jp.where(data.q[2] < min_z, 0.0, 1.0)
-    is_healthy = jp.where(data.q[2] > max_z, 0.0, is_healthy)
+    is_healthy = jp.where(data.qpos[2] < min_z, 0.0, 1.0)
+    is_healthy = jp.where(data.qpos[2] > max_z, 0.0, is_healthy)
     
     healthy_reward = self._healthy_reward if self._terminate_when_unhealthy else self._healthy_reward * is_healthy
 
-    # Control Cost 
-    joint_pos_delta = data.qpos[7:] - data0.qpos[7:]
-    ctrl_cost = self._ctrl_cost_weight * jp.sum(jp.square(joint_pos_delta))
-
-    # Total Reward (Now includes action_rate_cost)
-    reward = forward_reward + healthy_reward - ctrl_cost - sideways_cost - tilt_cost - action_rate_cost
+    reward = forward_reward + healthy_reward - sideways_cost - tilt_cost - action_rate_cost
     
     done = 1.0 - is_healthy if self._terminate_when_unhealthy else 0.0
     
     # Get Observation
-    obs = self._get_obs(data, noisy_action, new_history, rng_obs)
+    obs = self._get_obs(new_history, new_imu_history)
     
     state.metrics.update(
         forward_reward=forward_reward,
         reward_linvel=forward_reward,
-        reward_quadctrl=-ctrl_cost,
-        reward_action_rate=-action_rate_cost, # Log the cost
+        reward_action_rate=-action_rate_cost,
         reward_orientation=-tilt_cost,
         reward_alive=healthy_reward,
         x_velocity=velocity[0],
@@ -262,30 +271,15 @@ class Biped(PipelineEnv):
         info={
             **state.info, 
             'action_history': new_history,
+            'imu_history': new_imu_history,
             'rng': rng 
         }
     )
 
-  def _get_obs(self, data: jax.numpy.ndarray, action: jp.ndarray, action_history: jp.ndarray, rng: jp.ndarray) -> jp.ndarray:
-    # 1. Get Sensor Data (Realistic: only what the Pico has access to)
-    gyro_readings = data.sensordata[0:3]
-    accel_readings = data.sensordata[3:6] # In MuJoCo, accel sensors inherently register gravity
-    
-    # 2. Add Observation Noise
-    # Gyro (3) + Accel (3) = 6 total
-    noise = jax.random.normal(rng, (6,)) * self._obs_noise_scale
-    
-    gyro_readings += noise[0:3]
-    accel_readings += noise[3:6]
-
-    # 3. Get Action History 
-    history_flat = action_history.flatten()
-
-    # 4. Concatenate (No cheating with perfect quaternions!)
+  def _get_obs(self, action_history: jp.ndarray, imu_history: jp.ndarray) -> jp.ndarray:
     return jp.concatenate([
-        history_flat,                  
-        gyro_readings,           
-        accel_readings           
+        action_history.flatten(),                  
+        imu_history.flatten()           
     ])
 
 envs.register_environment('biped', Biped)
@@ -412,13 +406,13 @@ train_fn = functools.partial(
     normalize_observations=True, 
     action_repeat=1,
     unroll_length=128,
-    num_minibatches=64, 
+    num_minibatches=32,
     num_updates_per_batch=8,
     discounting=0.995, 
     learning_rate=3e-4, 
     entropy_cost=1e-3, 
-    num_envs=4096,
-    batch_size=8192, 
+    num_envs=1024,
+    batch_size=4096,
     seed=0, 
     policy_params_fn=policy_params_fn, 
     restore_checkpoint_path=restore_path)
