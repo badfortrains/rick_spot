@@ -86,7 +86,7 @@ class Biped(PipelineEnv):
     orientation_cost_weight=1.0,
     healthy_reward=1.0,
     terminate_when_unhealthy=True,
-    healthy_z_range=(0.02, 0.15),
+    healthy_z_range=(0.02, 0.25),
     reset_noise_scale=0.002,
     action_noise_scale=0.02,  
     obs_noise_scale=0.01,     
