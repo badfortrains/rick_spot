@@ -86,7 +86,7 @@ class Biped(PipelineEnv):
     orientation_cost_weight=1.0,
     healthy_reward=1.0,
     terminate_when_unhealthy=True,
-    healthy_z_range=(0.02, 0.25),
+    healthy_z_range=(0.02, 0.3),
     reset_noise_scale=0.002,
     action_noise_scale=0.02,  
     obs_noise_scale=0.01,     
@@ -96,7 +96,7 @@ class Biped(PipelineEnv):
     path = ROOT_RICK_PATH / "assemblyDerived_v17.xml"
     mj_model = mujoco.MjModel.from_xml_path(path.as_posix())
     mj_model.opt.solver = mujoco.mjtSolver.mjSOL_NEWTON
-    mj_model.opt.iterations = 10 
+    mj_model.opt.iterations = 30 
     mj_model.opt.ls_iterations = 6
 
     sys = mjcf.load_model(mj_model)
