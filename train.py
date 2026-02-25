@@ -96,7 +96,7 @@ class Biped(PipelineEnv):
     path = ROOT_RICK_PATH / "assemblyDerived_v17.xml"
     mj_model = mujoco.MjModel.from_xml_path(path.as_posix())
     mj_model.opt.solver = mujoco.mjtSolver.mjSOL_NEWTON
-    mj_model.opt.iterations = 30 
+    mj_model.opt.iterations = 10 
     mj_model.opt.ls_iterations = 6
 
     sys = mjcf.load_model(mj_model)
