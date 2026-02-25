@@ -17,26 +17,21 @@ if not BUCKET_NAME:
 GCS_BUCKET_URI = f'gs://{BUCKET_NAME}/rick_v2_checkpoints'
 # ---------------------
 
-
 try:
     if not jax.devices('gpu'):
         raise RuntimeError("JAX could not find any GPU devices.")
     else:
         print(f"JAX found the following devices: {jax.devices()}")
-
 except Exception as e:
     print(f"Error checking JAX devices: {e}")
-    # Fallback/Debug: print system devices
     subprocess.run(['nvidia-smi'])
     raise RuntimeError("GPU not available to JAX. Check your setup.")
-
 
 if subprocess.run('nvidia-smi').returncode:
   raise RuntimeError(
       'Cannot communicate with GPU. '
-      'Make sure you are using a GPU Colab runtime. '
-      'Go to the Runtime menu and select Choose runtime type.')
-
+      'Make sure you are using a GPU Colab runtime.'
+  )
 
 # 1. Setup EGL for Headless Rendering
 print("Configuring EGL...")
@@ -53,7 +48,6 @@ with open(NVIDIA_ICD_CONFIG_PATH, 'w') as f:
 }
 """)
     
-
 os.environ['MUJOCO_GL'] = 'egl'
 xla_flags = os.environ.get('XLA_FLAGS', '')
 xla_flags += ' --xla_gpu_triton_gemm_any=True'
@@ -86,6 +80,7 @@ class Biped(PipelineEnv):
     self,
     forward_reward_weight=1.0,
     ctrl_cost_weight=0.01,
+    action_rate_cost_weight=0.1,
     sideways_cost_weight=0.05,
     sideways_body_cost=0.5,
     orientation_cost_weight=1.0,
@@ -93,8 +88,8 @@ class Biped(PipelineEnv):
     terminate_when_unhealthy=True,
     healthy_z_range=(0.02, 0.15),
     reset_noise_scale=0.002,
-    action_noise_scale=0.02,  # Noise added to motor commands
-    obs_noise_scale=0.01,     # Noise added to sensor readings
+    action_noise_scale=0.02,  
+    obs_noise_scale=0.01,     
     exclude_current_positions_from_observation=True,
     **kwargs,
   ):
@@ -117,6 +112,7 @@ class Biped(PipelineEnv):
     self.action_dim = 6
     self._forward_reward_weight = forward_reward_weight
     self._ctrl_cost_weight = ctrl_cost_weight
+    self._action_rate_cost_weight = action_rate_cost_weight
     self._orientation_cost_weight = orientation_cost_weight
     self._healthy_reward = healthy_reward
     self._terminate_when_unhealthy = terminate_when_unhealthy
@@ -155,6 +151,7 @@ class Biped(PipelineEnv):
         'forward_reward': zero,
         'reward_linvel': zero,
         'reward_quadctrl': zero,
+        'reward_action_rate': zero, # Track smoothing penalty
         'reward_orientation': zero,
         'reward_alive': zero,
         'x_position': zero,
@@ -180,6 +177,11 @@ class Biped(PipelineEnv):
     rng = state.info['rng']
     rng, rng_act, rng_obs = jax.random.split(rng, 3)
 
+    # 1. Action Smoothing Cost (Calculate before modifying history)
+    current_history = state.info['action_history']
+    last_action = current_history[-1]
+    action_rate_cost = self._action_rate_cost_weight * jp.sum(jp.square(action - last_action))
+
     # 2. Add Noise
     noise = jax.random.normal(rng_act, action.shape) * self._action_noise_scale
     noisy_action = jp.clip(action + noise, -1.0, 1.0)
@@ -192,7 +194,6 @@ class Biped(PipelineEnv):
     scaled_action = noisy_action * action_scale + action_offset
 
     # Update history
-    current_history = state.info['action_history']
     new_history = jp.roll(current_history, shift=-1, axis=0)
     new_history = new_history.at[-1].set(noisy_action) 
 
@@ -234,8 +235,8 @@ class Biped(PipelineEnv):
     joint_pos_delta = data.qpos[7:] - data0.qpos[7:]
     ctrl_cost = self._ctrl_cost_weight * jp.sum(jp.square(joint_pos_delta))
 
-    # Total Reward
-    reward = forward_reward + healthy_reward - ctrl_cost - sideways_cost - tilt_cost
+    # Total Reward (Now includes action_rate_cost)
+    reward = forward_reward + healthy_reward - ctrl_cost - sideways_cost - tilt_cost - action_rate_cost
     
     done = 1.0 - is_healthy if self._terminate_when_unhealthy else 0.0
     
@@ -246,6 +247,7 @@ class Biped(PipelineEnv):
         forward_reward=forward_reward,
         reward_linvel=forward_reward,
         reward_quadctrl=-ctrl_cost,
+        reward_action_rate=-action_rate_cost, # Log the cost
         reward_orientation=-tilt_cost,
         reward_alive=healthy_reward,
         x_velocity=velocity[0],
@@ -265,36 +267,23 @@ class Biped(PipelineEnv):
     )
 
   def _get_obs(self, data: jax.numpy.ndarray, action: jp.ndarray, action_history: jp.ndarray, rng: jp.ndarray) -> jp.ndarray:
-    # 1. Get Sensor Data
-    # Assuming the first sensors in your XML are Gyro and Accel
+    # 1. Get Sensor Data (Realistic: only what the Pico has access to)
     gyro_readings = data.sensordata[0:3]
-    accel_readings = data.sensordata[3:6]
+    accel_readings = data.sensordata[3:6] # In MuJoCo, accel sensors inherently register gravity
     
-    # Compute Gravity Vector instead of reading Quaternion 
-    # We get the robot's actual orientation from the system state (q[3:7] is standard for root quat)
-    root_rot = data.q[3:7]
-    
-    # We want the gravity vector [0, 0, -1] in the BODY frame.
-    # To do this, we rotate global gravity by the inverse of the body orientation.
-    inv_root_rot = math.quat_inv(root_rot)
-    gravity_vec = math.rotate(jp.array([0.0, 0.0, -1.0]), inv_root_rot)
-
     # 2. Add Observation Noise
-    # Gyro (3) + Accel (3) + GravityVec (3) = 9 total
-    flat_sensor_dim = 3 + 3 + 3 
-    noise = jax.random.normal(rng, (flat_sensor_dim,)) * self._obs_noise_scale
+    # Gyro (3) + Accel (3) = 6 total
+    noise = jax.random.normal(rng, (6,)) * self._obs_noise_scale
     
     gyro_readings += noise[0:3]
     accel_readings += noise[3:6]
-    gravity_vec += noise[6:9]
 
     # 3. Get Action History 
     history_flat = action_history.flatten()
 
-    # 4. Concatenate
+    # 4. Concatenate (No cheating with perfect quaternions!)
     return jp.concatenate([
-        history_flat,            
-        gravity_vec,      
+        history_flat,                  
         gyro_readings,           
         accel_readings           
     ])
@@ -307,58 +296,40 @@ env_name = 'biped'
 env = envs.get_environment(env_name)
 eval_env = envs.get_environment(env_name)
 
-# Local temporary path
 ckpt_path = epath.Path('/tmp/rick_v2_checkpoints')
 ckpt_path.mkdir(parents=True, exist_ok=True)
 
 config = checkpoint.network_config(
     env.observation_size,
     env.action_size,
-    True,
+    True, # normalize_observations
     ppo_networks.make_ppo_networks
 )
 
-
 def render_video(params, make_policy, step_count):
-    """Generates a rollout and renders it to an MP4 file."""
     print(f"Rendering video for step {step_count}...")
-    
-    # Create inference function from params
     inference_fn = make_policy(params)
     jit_inference_fn = jax.jit(inference_fn)
     jit_reset = jax.jit(eval_env.reset)
     jit_step = jax.jit(eval_env.step)
 
-    # Run Rollout (Simulate 500 steps = approx 2-4 seconds)
     rng = jax.random.PRNGKey(0)
     state = jit_reset(rng)
     
     states = []
     for _ in range(500):
-        # Store state for rendering
         states.append(state.pipeline_state)
-        
-        # Inference
         act_rng, rng = jax.random.split(rng)
         action, _ = jit_inference_fn(state.obs, act_rng)
-        
-        # Step
         state = jit_step(state, action)
-
         if state.done:
             break
 
-    # Render Frames
     frames = eval_env.render(states, width=320, height=240, camera='track')
-
-    # Save to MP4
     video_filename = f'{step_count}.mp4'
     local_video_path = ckpt_path / video_filename
-    
-    # Save video at 30 FPS
     imageio.mimsave(str(local_video_path), frames, fps=30)
     print(f"Video saved locally to {local_video_path}")
-    
     return local_video_path
 
 def policy_params_fn(current_step, make_policy, params):
@@ -366,61 +337,37 @@ def policy_params_fn(current_step, make_policy, params):
   checkpoint.save(path, current_step, params, config)
   print(f"Saved checkpoint to {path}")
   
-  # 2. Render and Save Video Locally
   try:
       local_vid_path = render_video(params, make_policy, current_step)
   except Exception as e:
       print(f"Video rendering failed: {e}")
       local_vid_path = None
 
-  # 3. Sync everything to GCS
   try:
-      # Upload Checkpoint
-      subprocess.run(
-          ['gsutil', '-m', 'cp', '-r', str(path), GCS_BUCKET_URI], 
-          check=True
-      )
-      
-      # Upload Video (if it was generated)
+      subprocess.run(['gsutil', '-m', 'cp', '-r', str(path), GCS_BUCKET_URI], check=True)
       if local_vid_path:
-          subprocess.run(
-              ['gsutil', 'cp', str(local_vid_path), GCS_BUCKET_URI],
-              check=True
-          )
+          subprocess.run(['gsutil', 'cp', str(local_vid_path), GCS_BUCKET_URI], check=True)
           print(f"Synced video to {GCS_BUCKET_URI}/{local_vid_path.name}")
-          
       print(f"Synced checkpoint to {GCS_BUCKET_URI}")
   except Exception as e:
       print(f"Failed to sync to GCS: {e}")
 
-# Headless progress reporter
 def progress(num_steps, metrics):
     print(f"Step: {num_steps}, Reward: {metrics['eval/episode_reward']:.3f}, Std: {metrics['eval/episode_reward_std']:.3f}", flush=True)
 
-
 def get_latest_checkpoint_from_gcs(gcs_uri):
-    """Finds the latest checkpoint step in GCS."""
     print(f"Checking for checkpoints in {gcs_uri}...")
     try:
-        # List directories in the GCS bucket
-        result = subprocess.run(
-            ['gsutil', 'ls', gcs_uri], 
-            capture_output=True, text=True
-        )
-        
+        result = subprocess.run(['gsutil', 'ls', gcs_uri], capture_output=True, text=True)
         if result.returncode != 0:
             print("No existing checkpoints found (or bucket inaccessible).")
             return None, None
 
-        # Parse paths to find the largest integer step
-        # Expected format: gs://bucket/.../1000/
         paths = result.stdout.strip().split('\n')
         checkpoints = []
         for p in paths:
-            # clean trailing slash
             clean_p = p.rstrip('/')
             try:
-                # Get the last segment and convert to int
                 step = int(clean_p.split('/')[-1])
                 checkpoints.append((step, p))
             except ValueError:
@@ -429,7 +376,6 @@ def get_latest_checkpoint_from_gcs(gcs_uri):
         if not checkpoints:
             return None, None
 
-        # Sort by step count (ascending) and get the last one
         latest_step, latest_path = sorted(checkpoints)[-1]
         return latest_step, latest_path
 
@@ -444,17 +390,11 @@ if latest_gcs_path:
     latest_gcs_path = f"{latest_gcs_path}000{latest_step}/"
     print(f"Found latest checkpoint: {latest_step}")
     
-    # 2. Download to local tmp
     local_restore_dir = epath.Path(f'/tmp/rick_v2_restore/{latest_step}')
     local_restore_dir.mkdir(parents=True, exist_ok=True)
     
     print(f"Downloading {latest_gcs_path} to {local_restore_dir}...")
-    subprocess.run(
-        ['gsutil', '-m', 'cp', '-r', f"{latest_gcs_path}*", str(local_restore_dir)], 
-        check=True
-    )
-    
-    # 3. Set the path for Brax
+    subprocess.run(['gsutil', '-m', 'cp', '-r', f"{latest_gcs_path}*", str(local_restore_dir)], check=True)
     restore_path = str(local_restore_dir)
     print("Restore path set successfully.")
 else:
