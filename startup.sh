@@ -31,7 +31,7 @@ source /opt/venv/bin/activate
 pip install --upgrade pip
 
 echo "Cloning repository..."
-git clone -b reward https://github.com/badfortrains/rick_spot.git /opt/rick_spot
+git clone https://github.com/badfortrains/rick_spot.git /opt/rick_spot
 
 # Navigate into the cloned directory so requirements and scripts are found
 cd /opt/rick_spot

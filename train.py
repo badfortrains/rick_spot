@@ -87,7 +87,7 @@ class Biped(PipelineEnv):
     healthy_z_range=(0.02, 0.3),
     reset_noise_scale=0.002,
     action_noise_scale=0.02,  
-    obs_noise_scale=0.01,     
+    obs_noise_scale=0.05,
     exclude_current_positions_from_observation=True,
     **kwargs,
   ):
@@ -134,9 +134,10 @@ class Biped(PipelineEnv):
         rng1, (self.sys.nq,), minval=low, maxval=hi
     )
     
-    # 1. Normalize the quaternion to prevent physics divergence (NaNs)
+    # 1. Normalize the quaternion
     root_quat = qpos[3:7]
-    qpos = qpos.at[3:7].set(root_quat / jp.linalg.norm(root_quat))
+    root_quat = root_quat / jp.linalg.norm(root_quat)
+    qpos = qpos.at[3:7].set(root_quat)
 
     qvel = jax.random.uniform(
         rng2, (self.sys.nv,), minval=low, maxval=hi
@@ -145,13 +146,19 @@ class Biped(PipelineEnv):
 
     action_history = jp.zeros((self._history_len, self._action_dim))
     
-    # 2. Initialize IMU History buffer
-    obs_key, imu_key = jax.random.split(step_key)
-    raw_imu = jp.concatenate([data.sensordata[0:3], data.sensordata[3:6]])
-    noisy_imu = raw_imu + jax.random.normal(imu_key, (6,)) * self._obs_noise_scale
-    imu_history = jp.tile(noisy_imu, (self._history_len, 1))
+    # 2. Get Ground Truth Gravity in Local Frame
+    # Conjugate of [w, x, y, z] is [w, -x, -y, -z]
+    inv_quat = jp.array([root_quat[0], -root_quat[1], -root_quat[2], -root_quat[3]])
     
-    obs = self._get_obs(data, action_history, imu_history)
+    # Rotate world "down" into local frame
+    gravity_world = jp.array([0.0, 0.0, -1.0])
+    gravity_local = math.rotate(gravity_world, inv_quat)
+    
+    # Add noise to simulate filter inaccuracy
+    obs_key, noise_key = jax.random.split(step_key)
+    noisy_gravity = gravity_local + jax.random.normal(noise_key, (3,)) * self._obs_noise_scale
+    
+    obs = self._get_obs(data, action_history, noisy_gravity)
     
     reward, done, zero = jp.zeros(3)
     metrics = {
@@ -175,7 +182,6 @@ class Biped(PipelineEnv):
         metrics=metrics, 
         info={
             'action_history': action_history,
-            'imu_history': imu_history, # Added IMU history to info state
             'rng': step_key 
         }
     )
@@ -188,7 +194,7 @@ class Biped(PipelineEnv):
     last_action = current_history[-1]
     action_rate_cost = self._action_rate_cost_weight * jp.sum(jp.square(action - last_action))
 
-    # 2. Add Noise
+    # Add Noise to Action
     noise = jax.random.normal(rng_act, action.shape) * self._action_noise_scale
     noisy_action = jp.clip(action + noise, -1.0, 1.0)
 
@@ -205,18 +211,18 @@ class Biped(PipelineEnv):
 
     data0 = state.pipeline_state
     
-    # Step physics
     data = self.pipeline_step(data0, scaled_action)
     
-    # 3. Update IMU History
-    raw_imu = jp.concatenate([data.sensordata[0:3], data.sensordata[3:6]])
-    noisy_imu = raw_imu + jax.random.normal(rng_obs, (6,)) * self._obs_noise_scale
+    # Extract Ground Truth Gravity
+    root_quat = data.qpos[3:7]
+    inv_quat = jp.array([root_quat[0], -root_quat[1], -root_quat[2], -root_quat[3]])
+    gravity_world = jp.array([0.0, 0.0, -1.0])
+    gravity_local = math.rotate(gravity_world, inv_quat)
     
-    current_imu_history = state.info['imu_history']
-    new_imu_history = jp.roll(current_imu_history, shift=-1, axis=0)
-    new_imu_history = new_imu_history.at[-1].set(noisy_imu)
+    # Apply Noise
+    noisy_gravity = gravity_local + jax.random.normal(rng_obs, (3,)) * self._obs_noise_scale
     
-    # Kinematics
+    # Kinematics & Rewards
     com_before = data0.subtree_com[self._body_idx]
     com_after = data.subtree_com[self._body_idx]
     velocity = (com_after - com_before) / self.dt
@@ -234,7 +240,6 @@ class Biped(PipelineEnv):
     sideways_cost = self._sideways_cost_weight * jp.abs(sideways_speed)
 
     # Orientation logic
-    root_quat = data.qpos[3:7]
     projected_up = math.rotate(jp.array([0., 0., 1.]), root_quat)
     tilt_cost = self._orientation_cost_weight * jp.sum(jp.square(projected_up[:2]))
 
@@ -250,7 +255,7 @@ class Biped(PipelineEnv):
     done = 1.0 - is_healthy if self._terminate_when_unhealthy else 0.0
     
     # Get Observation
-    obs = self._get_obs(data, new_history, new_imu_history)
+    obs = self._get_obs(data, new_history, noisy_gravity)
     
     state.metrics.update(
         forward_reward=forward_reward,
@@ -270,12 +275,11 @@ class Biped(PipelineEnv):
         info={
             **state.info, 
             'action_history': new_history,
-            'imu_history': new_imu_history,
             'rng': rng 
         }
     )
 
-  def _get_obs(self, data: mjx.Data, action_history: jp.ndarray, imu_history: jp.ndarray) -> jp.ndarray:
+  def _get_obs(self, data: mjx.Data, action_history: jp.ndarray, noisy_gravity: jp.ndarray) -> jp.ndarray:
     t = data.time
     
     phase_sin = jp.sin(2.0 * jp.pi * self._step_frequency * t)
@@ -284,7 +288,7 @@ class Biped(PipelineEnv):
 
     return jp.concatenate([
         action_history.flatten(),                  
-        imu_history.flatten(),
+        noisy_gravity,   
         clock.flatten()       
     ])
 
