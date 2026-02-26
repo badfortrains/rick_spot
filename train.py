@@ -82,7 +82,7 @@ class Biped(PipelineEnv):
     action_rate_cost_weight=1.0,
     sideways_cost_weight=0.5,
     orientation_cost_weight=0.1,
-    healthy_reward=0.5,
+    healthy_reward=1.0,
     terminate_when_unhealthy=True,
     healthy_z_range=(0.02, 0.3),
     reset_noise_scale=0.002,
