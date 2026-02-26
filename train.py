@@ -79,9 +79,8 @@ class Biped(PipelineEnv):
   def __init__(
     self,
     forward_reward_weight=1.0,
-    action_rate_cost_weight=0.01,
-    sideways_cost_weight=0.05,
-    sideways_body_cost=0.5,
+    action_rate_cost_weight=1.0,
+    sideways_cost_weight=0.5,
     orientation_cost_weight=0.1,
     healthy_reward=1.0,
     terminate_when_unhealthy=True,
@@ -126,7 +125,6 @@ class Biped(PipelineEnv):
         sys.mj_model, mujoco.mjtObj.mjOBJ_BODY.value, 'body'
     )
     self._sideways_cost_weight = sideways_cost_weight
-    self._sideways_body_cost = sideways_body_cost
 
   def reset(self, rng: jp.ndarray) -> State:
     rng, rng1, rng2, step_key = jax.random.split(rng, 4)
