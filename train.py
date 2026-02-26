@@ -106,7 +106,7 @@ class Biped(PipelineEnv):
 
     super().__init__(sys, **kwargs)
 
-    self._history_len = 20
+    self._history_len = 40
     self._step_frequency = 1.5
     self._action_dim = 6
     self._forward_reward_weight = forward_reward_weight
