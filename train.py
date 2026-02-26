@@ -100,15 +100,16 @@ class Biped(PipelineEnv):
 
     sys = mjcf.load_model(mj_model)
 
-    physics_steps_per_control_step = 2
+    physics_steps_per_control_step = 10
     kwargs['n_frames'] = kwargs.get(
         'n_frames', physics_steps_per_control_step)
     kwargs['backend'] = 'mjx'
 
     super().__init__(sys, **kwargs)
 
-    self.history_len = 5
-    self.action_dim = 6
+    self._history_len = 20
+    self._step_frequency = 1.5
+    self._action_dim = 6
     self._forward_reward_weight = forward_reward_weight
     self._action_rate_cost_weight = action_rate_cost_weight
     self._orientation_cost_weight = orientation_cost_weight
@@ -144,15 +145,15 @@ class Biped(PipelineEnv):
     )
     data = self.pipeline_init(qpos, qvel)
 
-    action_history = jp.zeros((self.history_len, self.action_dim))
+    action_history = jp.zeros((self._history_len, self._action_dim))
     
     # 2. Initialize IMU History buffer
     obs_key, imu_key = jax.random.split(step_key)
     raw_imu = jp.concatenate([data.sensordata[0:3], data.sensordata[3:6]])
     noisy_imu = raw_imu + jax.random.normal(imu_key, (6,)) * self._obs_noise_scale
-    imu_history = jp.tile(noisy_imu, (self.history_len, 1))
+    imu_history = jp.tile(noisy_imu, (self._history_len, 1))
     
-    obs = self._get_obs(action_history, imu_history)
+    obs = self._get_obs(data, action_history, imu_history)
     
     reward, done, zero = jp.zeros(3)
     metrics = {
@@ -251,7 +252,7 @@ class Biped(PipelineEnv):
     done = 1.0 - is_healthy if self._terminate_when_unhealthy else 0.0
     
     # Get Observation
-    obs = self._get_obs(new_history, new_imu_history)
+    obs = self._get_obs(data, new_history, new_imu_history)
     
     state.metrics.update(
         forward_reward=forward_reward,
@@ -276,10 +277,17 @@ class Biped(PipelineEnv):
         }
     )
 
-  def _get_obs(self, action_history: jp.ndarray, imu_history: jp.ndarray) -> jp.ndarray:
+  def _get_obs(self, data: mjx.Data, action_history: jp.ndarray, imu_history: jp.ndarray) -> jp.ndarray:
+    t = data.time
+    
+    phase_sin = jp.sin(2.0 * jp.pi * self._step_frequency * t)
+    phase_cos = jp.cos(2.0 * jp.pi * self._step_frequency * t)
+    clock = jp.array([phase_sin, phase_cos])
+
     return jp.concatenate([
         action_history.flatten(),                  
-        imu_history.flatten()           
+        imu_history.flatten(),
+        clock.flatten()       
     ])
 
 envs.register_environment('biped', Biped)
@@ -402,7 +410,7 @@ train_fn = functools.partial(
     num_timesteps=100_000_000, 
     num_evals=30, 
     reward_scaling=0.1,
-    episode_length=2500,
+    episode_length=1000,
     normalize_observations=True, 
     action_repeat=1,
     unroll_length=128,
