@@ -82,7 +82,7 @@ class Biped(PipelineEnv):
     action_rate_cost_weight=1.0,
     sideways_cost_weight=0.5,
     orientation_cost_weight=0.1,
-    healthy_reward=0.2,
+    healthy_reward=0.5,
     terminate_when_unhealthy=True,
     healthy_z_range=(0.02, 0.3),
     reset_noise_scale=0.002,
@@ -107,7 +107,7 @@ class Biped(PipelineEnv):
     super().__init__(sys, **kwargs)
 
     self._history_len = 40
-    self._step_frequency = 1.5
+    self._step_frequency = 1
     self._action_dim = 6
     self._forward_reward_weight = forward_reward_weight
     self._action_rate_cost_weight = action_rate_cost_weight
