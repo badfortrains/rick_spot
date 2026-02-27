@@ -79,15 +79,15 @@ class Biped(PipelineEnv):
   def __init__(
     self,
     forward_reward_weight=1.0,
-    action_rate_cost_weight=0.2,
+    action_rate_cost_weight=1.0,
     sideways_cost_weight=0.2,
     orientation_cost_weight=0.1,
     healthy_reward=1.0,
     terminate_when_unhealthy=True,
     healthy_z_range=(0.02, 0.3),
     reset_noise_scale=0.002,
-    action_noise_scale=0.02,  
-    obs_noise_scale=0.05,
+    action_noise_scale=0.02,
+    obs_noise_scale=0.06,
     exclude_current_positions_from_observation=True,
     **kwargs,
   ):
