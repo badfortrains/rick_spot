@@ -198,12 +198,16 @@ class Biped(PipelineEnv):
     noise = jax.random.normal(rng_act, action.shape) * self._action_noise_scale
     noisy_action = jp.clip(action + noise, -1.0, 1.0)
 
+    #Apply the Low-Pass Filter
+    alpha = 0.3 # Tune this! Lower = smoother but more sluggish
+    smoothed_action = alpha * noisy_action + (1.0 - alpha) * last_action
+
     # Map to actuator limits
     ctrl_min = self.sys.actuator_ctrlrange[:, 0]
     ctrl_max = self.sys.actuator_ctrlrange[:, 1]
     action_scale = (ctrl_max - ctrl_min) / 2.0
     action_offset = (ctrl_max + ctrl_min) / 2.0
-    scaled_action = noisy_action * action_scale + action_offset
+    scaled_action = smoothed_action * action_scale + action_offset
 
     # Update history
     new_history = jp.roll(current_history, shift=-1, axis=0)
