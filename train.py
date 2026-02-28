@@ -78,10 +78,10 @@ jax.config.update('jax_default_matmul_precision', 'high')
 class Biped(PipelineEnv):
   def __init__(
     self,
-    forward_reward_weight=1.0,
+    forward_reward_weight=2.0,
     action_rate_cost_weight=0.4,
     sideways_cost_weight=0.2,
-    orientation_cost_weight=0.1,
+    orientation_cost_weight=0.2,
     healthy_reward=1.0,
     terminate_when_unhealthy=True,
     healthy_z_range=(0.02, 0.3),
@@ -107,7 +107,7 @@ class Biped(PipelineEnv):
     super().__init__(sys, **kwargs)
 
     self._history_len = 40
-    self._step_frequency = 1
+    self._step_frequency = 1.5
     self._action_dim = 6
     self._forward_reward_weight = forward_reward_weight
     self._action_rate_cost_weight = action_rate_cost_weight
@@ -127,7 +127,8 @@ class Biped(PipelineEnv):
     self._sideways_cost_weight = sideways_cost_weight
 
   def reset(self, rng: jp.ndarray) -> State:
-    rng, rng1, rng2, step_key = jax.random.split(rng, 4)
+    rng, rng1, rng2, step_key, cmd_key = jax.random.split(rng, 5)
+    target_velocity = jax.random.uniform(cmd_key, minval=0.0, maxval=0.12)
     
     low, hi = -self._reset_noise_scale, self._reset_noise_scale
     qpos = self.sys.qpos0 + jax.random.uniform(
@@ -158,7 +159,7 @@ class Biped(PipelineEnv):
     obs_key, noise_key = jax.random.split(step_key)
     noisy_gravity = gravity_local + jax.random.normal(noise_key, (3,)) * self._obs_noise_scale
     
-    obs = self._get_obs(data, action_history, noisy_gravity)
+    obs = self._get_obs(data, action_history, noisy_gravity, target_velocity)
     
     reward, done, zero = jp.zeros(3)
     metrics = {
@@ -175,16 +176,17 @@ class Biped(PipelineEnv):
     }
     
     return State(
-        pipeline_state=data, 
-        obs=obs, 
-        reward=reward, 
-        done=done, 
-        metrics=metrics, 
-        info={
-            'action_history': action_history,
-            'rng': step_key 
-        }
-    )
+            pipeline_state=data,
+            obs=obs,
+            reward=reward,
+            done=done,
+            metrics=metrics,
+            info={
+                'action_history': action_history,
+                'rng': step_key,
+                'target_velocity': target_velocity
+            }
+        )
 
   def step(self, state: State, action: jp.ndarray) -> State:
     rng = state.info['rng']
@@ -225,6 +227,7 @@ class Biped(PipelineEnv):
     
     # Apply Noise
     noisy_gravity = gravity_local + jax.random.normal(rng_obs, (3,)) * self._obs_noise_scale
+    target_velocity = state.info['target_velocity']
     
     # Kinematics & Rewards
     com_before = data0.subtree_com[self._body_idx]
@@ -233,6 +236,12 @@ class Biped(PipelineEnv):
     vel_2d = velocity[:2] 
     
     forward_dir = jp.array([0.0, -1.0]) 
+    forward_velocity = jp.dot(vel_2d, forward_dir)
+    
+    # Calculate the sharp exponential reward
+    velocity_error = forward_velocity - target_velocity
+    shaping_constant = 100.0 
+    forward_reward = self._forward_reward_weight * jp.exp(-shaping_constant * jp.square(velocity_error))
     sideways_dir = jp.array([1.0, 0.0])
 
     # Linear Forward Reward
@@ -259,7 +268,7 @@ class Biped(PipelineEnv):
     done = 1.0 - is_healthy if self._terminate_when_unhealthy else 0.0
     
     # Get Observation
-    obs = self._get_obs(data, new_history, noisy_gravity)
+    obs = self._get_obs(data, new_history, noisy_gravity, target_velocity)
     
     state.metrics.update(
         forward_reward=forward_reward,
@@ -283,7 +292,7 @@ class Biped(PipelineEnv):
         }
     )
 
-  def _get_obs(self, data: mjx.Data, action_history: jp.ndarray, noisy_gravity: jp.ndarray) -> jp.ndarray:
+  def _get_obs(self, data: mjx.Data, action_history: jp.ndarray, noisy_gravity: jp.ndarray, target_velocity: jp.ndarray) -> jp.ndarray:
     t = data.time
     
     phase_sin = jp.sin(2.0 * jp.pi * self._step_frequency * t)
@@ -293,7 +302,8 @@ class Biped(PipelineEnv):
     return jp.concatenate([
         action_history.flatten(),                  
         noisy_gravity,   
-        clock.flatten()       
+        clock.flatten(),
+        jp.array([target_velocity])
     ])
 
 envs.register_environment('biped', Biped)
@@ -314,8 +324,8 @@ config = checkpoint.network_config(
     ppo_networks.make_ppo_networks
 )
 
-def render_video(params, make_policy, step_count):
-    print(f"Rendering video for step {step_count}...")
+def render_video(params, make_policy, step_count, test_speed=0.10):
+    print(f"Rendering video for step {step_count} at {test_speed} m/s...")
     inference_fn = make_policy(params)
     jit_inference_fn = jax.jit(inference_fn)
     jit_reset = jax.jit(eval_env.reset)
@@ -323,6 +333,19 @@ def render_video(params, make_policy, step_count):
 
     rng = jax.random.PRNGKey(0)
     state = jit_reset(rng)
+    
+    # --- INJECT CUSTOM SPEED ---
+    # 1. Override the random speed stored in the info dictionary
+    new_info = state.info
+    new_info['target_velocity'] = jp.array(test_speed)
+    
+    # 2. Overwrite the very last element of the observation array 
+    # (which is where we concatenated target_velocity in _get_obs)
+    new_obs = state.obs.at[-1].set(test_speed) 
+    
+    # 3. Create a new state with the injected command
+    state = state.replace(info=new_info, obs=new_obs)
+    # ---------------------------
     
     states = []
     for _ in range(500):
@@ -334,7 +357,9 @@ def render_video(params, make_policy, step_count):
             break
 
     frames = eval_env.render(states, width=320, height=240, camera='track')
-    video_filename = f'{step_count}.mp4'
+    
+    # Update filename to reflect the speed being tested
+    video_filename = f'{step_count}_speed_{test_speed}.mp4'
     local_video_path = ckpt_path / video_filename
     imageio.mimsave(str(local_video_path), frames, fps=30)
     print(f"Video saved locally to {local_video_path}")
