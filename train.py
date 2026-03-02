@@ -84,14 +84,14 @@ class Biped(PipelineEnv):
     orientation_cost_weight=0.2,
     healthy_reward=1.0,
     terminate_when_unhealthy=True,
-    healthy_z_range=(0.02, 0.3),
+    healthy_z_range=(0.0, 0.2),
     reset_noise_scale=0.002,
     action_noise_scale=0.02,
     obs_noise_scale=0.06,
     exclude_current_positions_from_observation=True,
     **kwargs,
   ):
-    path = ROOT_RICK_PATH / "assemblyDerived_v17.xml"
+    path = ROOT_RICK_PATH / "rickv3_v25.xml"
     mj_model = mujoco.MjModel.from_xml_path(path.as_posix())
     mj_model.opt.solver = mujoco.mjtSolver.mjSOL_NEWTON
     mj_model.opt.iterations = 10 
@@ -106,8 +106,8 @@ class Biped(PipelineEnv):
 
     super().__init__(sys, **kwargs)
 
-    self._history_len = 40
-    self._step_frequency = 1.5
+    self._history_len = 4
+    self._step_frequency = 0.8
     self._action_dim = 6
     self._forward_reward_weight = forward_reward_weight
     self._action_rate_cost_weight = action_rate_cost_weight
