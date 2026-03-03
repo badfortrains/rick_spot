@@ -91,7 +91,7 @@ class Biped(PipelineEnv):
     exclude_current_positions_from_observation=True,
     **kwargs,
   ):
-    path = ROOT_RICK_PATH / "rickv3_v25.xml"
+    path = ROOT_RICK_PATH / "v3Robot_v15.xml"
     mj_model = mujoco.MjModel.from_xml_path(path.as_posix())
     mj_model.opt.solver = mujoco.mjtSolver.mjSOL_NEWTON
     mj_model.opt.iterations = 10 
@@ -108,7 +108,7 @@ class Biped(PipelineEnv):
 
     self._history_len = 4
     self._step_frequency = 0.8
-    self._action_dim = 6
+    self._action_dim = 8
     self._forward_reward_weight = forward_reward_weight
     self._action_rate_cost_weight = action_rate_cost_weight
     self._orientation_cost_weight = orientation_cost_weight
