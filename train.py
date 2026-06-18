@@ -84,7 +84,7 @@ class Biped(PipelineEnv):
     orientation_cost_weight=0.2,
     healthy_reward=1.0,
     terminate_when_unhealthy=True,
-    healthy_z_range=(0.0, 0.2),
+    healthy_z_range=(0.05, 0.2),
     reset_noise_scale=0.002,
     action_noise_scale=0.02,
     obs_noise_scale=0.06,
@@ -245,8 +245,8 @@ class Biped(PipelineEnv):
     sideways_dir = jp.array([1.0, 0.0])
 
     # Linear Forward Reward
-    forward_velocity = jp.dot(vel_2d, forward_dir)
-    forward_reward = self._forward_reward_weight * forward_velocity
+    # forward_velocity = jp.dot(vel_2d, forward_dir)
+    # forward_reward = self._forward_reward_weight * forward_velocity
 
     # Sideways penalties
     sideways_speed = jp.dot(vel_2d, sideways_dir)
