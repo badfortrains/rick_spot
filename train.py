@@ -91,7 +91,7 @@ class Biped(PipelineEnv):
     exclude_current_positions_from_observation=True,
     **kwargs,
   ):
-    path = ROOT_RICK_PATH / "v3Robot_v15.xml"
+    path = ROOT_RICK_PATH / "v3Robot_v18.xml"
     mj_model = mujoco.MjModel.from_xml_path(path.as_posix())
     mj_model.opt.solver = mujoco.mjtSolver.mjSOL_NEWTON
     mj_model.opt.iterations = 10 
