@@ -1,7 +1,7 @@
 gcloud compute instances create rick-training-spot-1 \
     --project=$MY_PROJECT_ID \
-    --zone=us-west4-a \
-    --machine-type=g2-standard-16 \
+    --zone=us-west1-a \
+    --machine-type=g2-standard-12 \
     --provisioning-model=SPOT \
     --maintenance-policy=TERMINATE \
     --image-family=common-cu129-ubuntu-2204-nvidia-580 \
@@ -9,3 +9,4 @@ gcloud compute instances create rick-training-spot-1 \
     --scopes=https://www.googleapis.com/auth/cloud-platform \
     --metadata=install-nvidia-driver=True,target_bucket=$MY_BUCKET_NAME \
     --metadata-from-file startup-script=./startup.sh
+    
