@@ -1,5 +1,6 @@
 #! /bin/bash
 set -e
+export HOME=/root
 
 # Install ops-agent for GPU monitoring
 curl -sSO https://dl.google.com/cloudagents/add-google-cloud-ops-agent-repo.sh
@@ -22,19 +23,27 @@ while ! nvidia-smi; do
 done
 echo "GPU driver detected!"
 
+git config --system --add safe.directory '*'
+
 # --- 3. Create and Activate Virtual Environment ---
 # Install uv and create the env in /opt so it is separate from system python
 pip install uv
-uv venv /opt/venv
+export UV_PYTHON_INSTALL_DIR=/opt/uv_python
+if [ ! -d "/opt/venv" ]; then
+  uv venv --python 3.11 /opt/venv
+fi
 source /opt/venv/bin/activate
 
 # --- 4. Setup Python Environment (Inside venv) ---
-
-echo "Cloning repository..."
-git clone https://github.com/badfortrains/rick_spot.git /opt/rick_spot
-
-# Navigate into the cloned directory so requirements and scripts are found
-cd /opt/rick_spot
+if [ -d "/opt/rick_spot" ]; then
+  echo "Repository already exists at /opt/rick_spot, updating..."
+  cd /opt/rick_spot
+  git pull || true
+else
+  echo "Cloning repository..."
+  git clone https://github.com/badfortrains/rick_spot.git /opt/rick_spot
+  cd /opt/rick_spot
+fi
 
 # --- 6. Install Requirements ---
 # Install requirements first
@@ -42,3 +51,6 @@ uv pip install -r requirements.txt
 
 # Install JAX specifically after (or ensure requirements.txt doesn't overwrite it with CPU version)
 uv pip install --upgrade "jax[cuda12]"
+
+# Allow SSH users full access to the repo, venv, and python installation
+chmod -R a+rwX /opt/rick_spot /opt/venv /opt/uv_python
