@@ -1,8 +1,6 @@
 import os
 import subprocess
-import time
 import functools
-import shutil
 from datetime import datetime
 from typing import Any, Dict, Sequence, Tuple, Union
 import imageio
@@ -59,13 +57,14 @@ import numpy as np
 from etils import epath
 import mujoco
 from mujoco import mjx
-from brax import envs
 from brax import math
-from brax.envs.base import PipelineEnv, State
-from brax.io import mjcf, image
 from brax.training.agents.ppo import train as ppo
 from brax.training.agents.ppo import networks as ppo_networks
 from brax.training.agents.ppo import checkpoint
+import mujoco_playground
+from mujoco_playground._src import mjx_env
+from mujoco_playground import wrapper
+from ml_collections import config_dict
 
 # 3. Clone/Setup Assets
 if not os.path.exists('rick_v2'):
@@ -75,64 +74,58 @@ if not os.path.exists('rick_v2'):
 ROOT_RICK_PATH = epath.Path('rick_v2')
 jax.config.update('jax_default_matmul_precision', 'high')
 
-class Biped(PipelineEnv):
-  def __init__(
-    self,
-    forward_reward_weight=2.0,
-    action_rate_cost_weight=0.4,
-    sideways_cost_weight=0.2,
-    orientation_cost_weight=0.2,
-    healthy_reward=1.0,
-    terminate_when_unhealthy=True,
-    healthy_z_range=(0.05, 0.2),
-    reset_noise_scale=0.002,
-    action_noise_scale=0.02,
-    obs_noise_scale=0.06,
-    exclude_current_positions_from_observation=True,
-    **kwargs,
-  ):
+class Biped(mjx_env.MjxEnv):
+  def __init__(self, config: config_dict.ConfigDict, config_overrides: Dict[str, Any] = None):
+    super().__init__(config, config_overrides)
     path = ROOT_RICK_PATH / "v3Robot_v18.xml"
-    mj_model = mujoco.MjModel.from_xml_path(path.as_posix())
-    mj_model.opt.solver = mujoco.mjtSolver.mjSOL_NEWTON
-    mj_model.opt.iterations = 10 
-    mj_model.opt.ls_iterations = 6
-
-    sys = mjcf.load_model(mj_model)
-
-    physics_steps_per_control_step = 10
-    kwargs['n_frames'] = kwargs.get(
-        'n_frames', physics_steps_per_control_step)
-    kwargs['backend'] = 'mjx'
-
-    super().__init__(sys, **kwargs)
+    self._mj_model = mujoco.MjModel.from_xml_path(path.as_posix())
+    self._mj_model.opt.solver = mujoco.mjtSolver.mjSOL_NEWTON
+    self._mj_model.opt.iterations = 10 
+    self._mj_model.opt.ls_iterations = 6
+    self._mjx_model = mjx.put_model(self._mj_model)
 
     self._history_len = 4
     self._step_frequency = 0.8
     self._action_dim = 8
-    self._forward_reward_weight = forward_reward_weight
-    self._action_rate_cost_weight = action_rate_cost_weight
-    self._orientation_cost_weight = orientation_cost_weight
-    self._healthy_reward = healthy_reward
-    self._terminate_when_unhealthy = terminate_when_unhealthy
-    self._healthy_z_range = healthy_z_range
-    self._reset_noise_scale = reset_noise_scale
-    self._action_noise_scale = action_noise_scale 
-    self._obs_noise_scale = obs_noise_scale       
-    self._exclude_current_positions_from_observation = (
-        exclude_current_positions_from_observation
-    )
+    
+    self._forward_reward_weight = config.forward_reward_weight
+    self._action_rate_cost_weight = config.action_rate_cost_weight
+    self._orientation_cost_weight = config.orientation_cost_weight
+    self._sideways_cost_weight = config.sideways_cost_weight
+    self._healthy_reward = config.healthy_reward
+    self._terminate_when_unhealthy = config.terminate_when_unhealthy
+    self._healthy_z_range = config.healthy_z_range
+    self._reset_noise_scale = config.reset_noise_scale
+    self._action_noise_scale = config.action_noise_scale
+    self._obs_noise_scale = config.obs_noise_scale
+    
     self._body_idx = mujoco.mj_name2id(
-        sys.mj_model, mujoco.mjtObj.mjOBJ_BODY.value, 'body'
+        self._mj_model, mujoco.mjtObj.mjOBJ_BODY.value, 'body'
     )
-    self._sideways_cost_weight = sideways_cost_weight
 
-  def reset(self, rng: jp.ndarray) -> State:
+  @property
+  def xml_path(self) -> str:
+    return (ROOT_RICK_PATH / "v3Robot_v18.xml").as_posix()
+
+  @property
+  def action_size(self) -> int:
+    return self._mjx_model.nu
+
+  @property
+  def mj_model(self) -> mujoco.MjModel:
+    return self._mj_model
+
+  @property
+  def mjx_model(self) -> mjx.Model:
+    return self._mjx_model
+
+  def reset(self, rng: jp.ndarray) -> mjx_env.State:
     rng, rng1, rng2, step_key, cmd_key = jax.random.split(rng, 5)
     target_velocity = jax.random.uniform(cmd_key, minval=0.0, maxval=0.12)
     
     low, hi = -self._reset_noise_scale, self._reset_noise_scale
-    qpos = self.sys.qpos0 + jax.random.uniform(
-        rng1, (self.sys.nq,), minval=low, maxval=hi
+    qpos = self._mjx_model.qpos0 + jax.random.uniform(
+        rng1, (self._mjx_model.nq,), minval=low, maxval=hi
     )
     
     # 1. Normalize the quaternion
@@ -141,21 +134,19 @@ class Biped(PipelineEnv):
     qpos = qpos.at[3:7].set(root_quat)
 
     qvel = jax.random.uniform(
-        rng2, (self.sys.nv,), minval=low, maxval=hi
+        rng2, (self._mjx_model.nv,), minval=low, maxval=hi
     )
-    data = self.pipeline_init(qpos, qvel)
+
+    data = mujoco_playground._src.mjx_env.make_data(self._mj_model, qpos=qpos, qvel=qvel)
+    data = mjx.forward(self._mjx_model, data)
 
     action_history = jp.zeros((self._history_len, self._action_dim))
     
     # 2. Get Ground Truth Gravity in Local Frame
-    # Conjugate of [w, x, y, z] is [w, -x, -y, -z]
     inv_quat = jp.array([root_quat[0], -root_quat[1], -root_quat[2], -root_quat[3]])
-    
-    # Rotate world "down" into local frame
     gravity_world = jp.array([0.0, 0.0, -1.0])
     gravity_local = math.rotate(gravity_world, inv_quat)
     
-    # Add noise to simulate filter inaccuracy
     obs_key, noise_key = jax.random.split(step_key)
     noisy_gravity = gravity_local + jax.random.normal(noise_key, (3,)) * self._obs_noise_scale
     
@@ -175,20 +166,20 @@ class Biped(PipelineEnv):
         'y_velocity': zero,
     }
     
-    return State(
-            pipeline_state=data,
-            obs=obs,
-            reward=reward,
-            done=done,
-            metrics=metrics,
-            info={
-                'action_history': action_history,
-                'rng': step_key,
-                'target_velocity': target_velocity
-            }
-        )
+    return mjx_env.State(
+        data=data,
+        obs=obs,
+        reward=reward,
+        done=done,
+        metrics=metrics,
+        info={
+            'action_history': action_history,
+            'rng': step_key,
+            'target_velocity': target_velocity
+        }
+    )
 
-  def step(self, state: State, action: jp.ndarray) -> State:
+  def step(self, state: mjx_env.State, action: jp.ndarray) -> mjx_env.State:
     rng = state.info['rng']
     rng, rng_act, rng_obs = jax.random.split(rng, 3)
 
@@ -196,40 +187,33 @@ class Biped(PipelineEnv):
     last_action = current_history[-1]
     action_rate_cost = self._action_rate_cost_weight * jp.sum(jp.square(action - last_action))
 
-    # Add Noise to Action
     noise = jax.random.normal(rng_act, action.shape) * self._action_noise_scale
     noisy_action = jp.clip(action + noise, -1.0, 1.0)
 
-    #Apply the Low-Pass Filter
-    alpha = 0.3 # Tune this! Lower = smoother but more sluggish
+    alpha = 0.3
     smoothed_action = alpha * noisy_action + (1.0 - alpha) * last_action
 
-    # Map to actuator limits
-    ctrl_min = self.sys.actuator_ctrlrange[:, 0]
-    ctrl_max = self.sys.actuator_ctrlrange[:, 1]
+    ctrl_min = self._mjx_model.actuator_ctrlrange[:, 0]
+    ctrl_max = self._mjx_model.actuator_ctrlrange[:, 1]
     action_scale = (ctrl_max - ctrl_min) / 2.0
     action_offset = (ctrl_max + ctrl_min) / 2.0
     scaled_action = smoothed_action * action_scale + action_offset
 
-    # Update history
     new_history = jp.roll(current_history, shift=-1, axis=0)
     new_history = new_history.at[-1].set(noisy_action) 
 
-    data0 = state.pipeline_state
+    data0 = state.data
     
-    data = self.pipeline_step(data0, scaled_action)
+    data = mujoco_playground._src.mjx_env.step(self._mjx_model, data0, scaled_action, self.n_substeps)
     
-    # Extract Ground Truth Gravity
     root_quat = data.qpos[3:7]
     inv_quat = jp.array([root_quat[0], -root_quat[1], -root_quat[2], -root_quat[3]])
     gravity_world = jp.array([0.0, 0.0, -1.0])
     gravity_local = math.rotate(gravity_world, inv_quat)
     
-    # Apply Noise
     noisy_gravity = gravity_local + jax.random.normal(rng_obs, (3,)) * self._obs_noise_scale
     target_velocity = state.info['target_velocity']
     
-    # Kinematics & Rewards
     com_before = data0.subtree_com[self._body_idx]
     com_after = data.subtree_com[self._body_idx]
     velocity = (com_after - com_before) / self.dt
@@ -238,25 +222,17 @@ class Biped(PipelineEnv):
     forward_dir = jp.array([0.0, -1.0]) 
     forward_velocity = jp.dot(vel_2d, forward_dir)
     
-    # Calculate the sharp exponential reward
     velocity_error = forward_velocity - target_velocity
     shaping_constant = 100.0 
     forward_reward = self._forward_reward_weight * jp.exp(-shaping_constant * jp.square(velocity_error))
     sideways_dir = jp.array([1.0, 0.0])
 
-    # Linear Forward Reward
-    # forward_velocity = jp.dot(vel_2d, forward_dir)
-    # forward_reward = self._forward_reward_weight * forward_velocity
-
-    # Sideways penalties
     sideways_speed = jp.dot(vel_2d, sideways_dir)
     sideways_cost = self._sideways_cost_weight * jp.abs(sideways_speed)
 
-    # Orientation logic
     projected_up = math.rotate(jp.array([0., 0., 1.]), root_quat)
     tilt_cost = self._orientation_cost_weight * jp.sum(jp.square(projected_up[:2]))
 
-    # Healthy Check
     min_z, max_z = self._healthy_z_range
     is_healthy = jp.where(data.qpos[2] < min_z, 0.0, 1.0)
     is_healthy = jp.where(data.qpos[2] > max_z, 0.0, is_healthy)
@@ -267,7 +243,6 @@ class Biped(PipelineEnv):
     
     done = 1.0 - is_healthy if self._terminate_when_unhealthy else 0.0
     
-    # Get Observation
     obs = self._get_obs(data, new_history, noisy_gravity, target_velocity)
     
     state.metrics.update(
@@ -281,7 +256,7 @@ class Biped(PipelineEnv):
     )
     
     return state.replace(
-        pipeline_state=data, 
+        data=data, 
         obs=obs, 
         reward=reward, 
         done=done, 
@@ -306,13 +281,27 @@ class Biped(PipelineEnv):
         jp.array([target_velocity])
     ])
 
-envs.register_environment('biped', Biped)
-
 # 5. Training Logic
 print("Initializing Environment...")
-env_name = 'biped'
-env = envs.get_environment(env_name)
-eval_env = envs.get_environment(env_name)
+def biped_config() -> config_dict.ConfigDict:
+    return config_dict.ConfigDict({
+        'ctrl_dt': 0.02,
+        'sim_dt': 0.002,
+        'forward_reward_weight': 2.0,
+        'action_rate_cost_weight': 0.4,
+        'sideways_cost_weight': 0.2,
+        'orientation_cost_weight': 0.2,
+        'healthy_reward': 1.0,
+        'terminate_when_unhealthy': True,
+        'healthy_z_range': (0.05, 0.2),
+        'reset_noise_scale': 0.002,
+        'action_noise_scale': 0.02,
+        'obs_noise_scale': 0.06,
+    })
+
+base_env = Biped(biped_config())
+env = wrapper.wrap_for_brax_training(base_env, episode_length=1000, action_repeat=1)
+eval_env = wrapper.wrap_for_brax_training(base_env, episode_length=1000, action_repeat=1)
 
 ckpt_path = epath.Path('/tmp/rick_v2_checkpoints')
 ckpt_path.mkdir(parents=True, exist_ok=True)
@@ -328,8 +317,8 @@ def render_video(params, make_policy, step_count, test_speed=0.10):
     print(f"Rendering video for step {step_count} at {test_speed} m/s...")
     inference_fn = make_policy(params)
     jit_inference_fn = jax.jit(inference_fn)
-    jit_reset = jax.jit(eval_env.reset)
-    jit_step = jax.jit(eval_env.step)
+    jit_reset = jax.jit(base_env.reset)
+    jit_step = jax.jit(base_env.step)
 
     rng = jax.random.PRNGKey(0)
     state = jit_reset(rng)
@@ -349,14 +338,14 @@ def render_video(params, make_policy, step_count, test_speed=0.10):
     
     states = []
     for _ in range(500):
-        states.append(state.pipeline_state)
+        states.append(state)
         act_rng, rng = jax.random.split(rng)
         action, _ = jit_inference_fn(state.obs, act_rng)
         state = jit_step(state, action)
         if state.done:
             break
 
-    frames = eval_env.render(states, width=320, height=240, camera='track')
+    frames = base_env.render(states, width=320, height=240, camera='track')
     
     # Update filename to reflect the speed being tested
     video_filename = f'{step_count}_speed_{test_speed}.mp4'

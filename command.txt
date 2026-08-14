@@ -1,3 +1,4 @@
+# Do training
 gcloud compute instances create rick-training-spot-1 \
     --project=$MY_PROJECT_ID \
     --zone=us-west1-a \
@@ -9,4 +10,17 @@ gcloud compute instances create rick-training-spot-1 \
     --scopes=https://www.googleapis.com/auth/cloud-platform \
     --metadata=install-nvidia-driver=True,target_bucket=$MY_BUCKET_NAME \
     --metadata-from-file startup-script=./startup.sh
+    
+# Setup the enviornment, used to build a durable image
+gcloud compute instances create rick-training-spot-1 \
+    --project=$MY_PROJECT_ID \
+    --zone=us-west1-a \
+    --machine-type=g2-standard-12 \
+    --provisioning-model=SPOT \
+    --maintenance-policy=TERMINATE \
+    --image-family=common-cu129-ubuntu-2204-nvidia-580 \
+    --image-project=deeplearning-platform-release \
+    --scopes=https://www.googleapis.com/auth/cloud-platform \
+    --metadata=install-nvidia-driver=True,target_bucket=$MY_BUCKET_NAME \
+    --metadata-from-file startup-script=./setup_env.sh
     

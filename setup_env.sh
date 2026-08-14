@@ -42,11 +42,3 @@ uv pip install -r requirements.txt
 
 # Install JAX specifically after (or ensure requirements.txt doesn't overwrite it with CPU version)
 uv pip install --upgrade "jax[cuda12]"
-
-# --- 7. Run Training ---
-echo "Starting training..."
-# We utilize the python executable inside the venv explicitly
-/opt/venv/bin/python train.py
-
-echo "Training finished. Shutting down."
-sudo shutdown -h now

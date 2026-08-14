@@ -6,4 +6,5 @@ etils
 matplotlib
 ml_collections
 imageio[ffmpeg]
+mujoco_playground @ git+https://github.com/badfortrains/mujoco_playground.git@rick
 # We will install JAX specifically for CUDA in the startup script
