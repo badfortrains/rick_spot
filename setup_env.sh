@@ -1,6 +1,7 @@
 #! /bin/bash
 set -e
 export HOME=/root
+export MUJOCO_GL="egl"
 
 # Install ops-agent for GPU monitoring
 curl -sSO https://dl.google.com/cloudagents/add-google-cloud-ops-agent-repo.sh

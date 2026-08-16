@@ -1,6 +1,6 @@
 mujoco
 mujoco_mjx
-brax
+brax @ git+https://github.com/google/brax.git
 mediapy
 etils
 matplotlib
