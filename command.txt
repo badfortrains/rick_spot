@@ -33,5 +33,20 @@ gcloud compute instances create rick-training-spot-1 \
     --maintenance-policy=TERMINATE \
     --source-machine-image=rick-spot-base-image \
     --scopes=https://www.googleapis.com/auth/cloud-platform \
-    --metadata=install-nvidia-driver=True,target_bucket=$MY_BUCKET_NAME \
-    --metadata-from-file startup-script=./startup.sh
+    --metadata=install-nvidia-driver=True,target_bucket=$MY_BUCKET_NAME
+
+    source /opt/venv/bin/activate
+    cd /opt/rick_spot
+    uv pip install -r requirements.txt
+    train-jax-ppo --env_name RickJoystickSimpleFlatTerrain
+
+export MUJOCO_GL="egl"
+    train-jax-ppo \
+  --env_name RickJoystickSimpleFlatTerrain \
+  --play_only \
+  --load_checkpoint_path /opt/rick_spot/logs/RickJoystickSimpleFlatTerrain-20260816-190657/checkpoints
+
+    curl -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/attributes/target_bucket; echo;
+    gcloud storage cp /home/s3purcell/logs/RickJoystickSimpleFlatTerrain-20260814-184407/rollout0.mp4 gs://$GCS_BUCKET_NAME/rollout2.mp4
+
+
