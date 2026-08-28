@@ -27,26 +27,33 @@ gcloud compute instances create rick-training-spot-1 \
 # Run training using the custom image
 gcloud compute instances create rick-training-spot-1 \
     --project=$MY_PROJECT_ID \
-    --zone=us-west1-a \
+    --zone=us-central1-a \
     --machine-type=g2-standard-12 \
     --provisioning-model=SPOT \
     --maintenance-policy=TERMINATE \
-    --source-machine-image=rick-spot-base-image \
+    --source-machine-image=spot-updated \
     --scopes=https://www.googleapis.com/auth/cloud-platform \
     --metadata=install-nvidia-driver=True,target_bucket=$MY_BUCKET_NAME
 
     source /opt/venv/bin/activate
     cd /opt/rick_spot
     uv pip install -r requirements.txt
-    train-jax-ppo --env_name RickJoystickSimpleFlatTerrain
+    train-jax-ppo --env_name RickJoystickFlatTerrain
+
+uv pip install --upgrade brax
 
 export MUJOCO_GL="egl"
     train-jax-ppo \
-  --env_name RickJoystickSimpleFlatTerrain \
+  --env_name RickJoystickFlatTerrain \
   --play_only \
-  --load_checkpoint_path /opt/rick_spot/logs/RickJoystickSimpleFlatTerrain-20260816-190657/checkpoints
+  --load_checkpoint_path /opt/rick_spot/logs/RickJoystickFlatTerrain-20260828-030759/checkpoints
 
     curl -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/attributes/target_bucket; echo;
-    gcloud storage cp /home/s3purcell/logs/RickJoystickSimpleFlatTerrain-20260814-184407/rollout0.mp4 gs://$GCS_BUCKET_NAME/rollout2.mp4
+    gcloud storage cp /opt/rick_spot/logs/RickJoystickFlatTerrain-20260828-034232/rollout0.mp4 gs://rick_spot_bucket/rollout7.mp4
 
 
+
+/opt/rick_spot/logs/RickJoystickFlatTerrain-20260818-165853/checkpoints
+
+
+gcloud storage cp -r /opt/rick_spot/logs/RickJoystickFlatTerrain-20260828-030759/checkpoints gs://rick_spot_bucket/checkpoints

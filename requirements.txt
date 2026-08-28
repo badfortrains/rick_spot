@@ -2,7 +2,7 @@ mujoco
 mujoco_mjx
 brax @ git+https://github.com/google/brax.git
 mediapy
-etils
+etils[epath-gcs]
 matplotlib
 ml_collections
 imageio[ffmpeg]
