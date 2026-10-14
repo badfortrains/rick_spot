@@ -35,6 +35,10 @@ The `spot-updated` machine image is expected to contain `/opt/rick_spot` and
 Pico `build` directory must have been configured once through the Pico VS Code
 extension.
 
+Before starting PPO, the worker performs a small GCS file check and an Orbax
+save/restore check. This catches cloud path or permission problems before the
+first expensive training checkpoint.
+
 ## Run
 
 From this repository:
@@ -73,6 +77,24 @@ gs://$MY_BUCKET_NAME/rick-training/<run-id>/
 The corresponding local checkpoints are stored in
 `../rick_pico/checkpoints/<run-id>/checkpoints/`.
 
+If the local script is interrupted, resume watching the same run with its
+original run ID, project, bucket, and zone:
+
+```bash
+./automate_training.py \
+  --resume \
+  --run-id=20261014-035149 \
+  --project=rick-spot \
+  --bucket=rick_spot_bucket \
+  --zone=europe-west6-b
+```
+
+This skips VM creation, waits for the existing job, then downloads checkpoints,
+exports the policy, and builds/uploads the firmware as usual. It also works if
+the remote job has already succeeded and shut down. If the original run used
+a custom instance name, pass the same `--instance-name`. Training flags after
+`--` cannot be changed when resuming.
+
 The instance is stopped, not deleted, so its serial log remains available. A
 new default instance name is generated for each run. To inspect a running or
 failed startup job:
@@ -86,3 +108,52 @@ gcloud compute instances get-serial-port-output INSTANCE_NAME \
 If the Spot VM is preempted, any checkpoint whose `commit_success.txt` was
 written remains in GCS. The local command exits without exporting/building an
 incomplete run and prints its GCS prefix.
+
+
+## Rollout diagnostics
+
+New runs evaluate the final checkpoint with deterministic actions and fixed
+reset seeds 0, 1, 2, and 3. `rollout0.mp4` is rendered from the seed-0 trace.
+The worker uploads `diagnostics/` before shutting down and the local workflow
+downloads it into `../rick_pico/checkpoints/<run-id>/diagnostics/`.
+Resuming older runs without this artifact still works.
+
+`diagnostics/final/` contains `traces.npz`, `summary.json`, per-seed PNG plots,
+`metadata.json`, a nominal self-contained `model.mjb`, XML/mesh assets, source
+snapshots, and `rscope/` playback files. The outer directory also records the
+training command, checkpoint ID, training evaluation history (if available),
+and the orchestration script used by the worker.
+
+Open a bundle on macOS from the playground environment (install its
+`diagnostics` extra first):
+
+```bash
+mjpython -m learning.view_diagnostics ../rick_pico/checkpoints/<run-id>/diagnostics/final
+```
+
+Read the numeric data without pickle:
+
+```python
+import numpy as np
+trace = np.load("diagnostics/final/traces.npz", allow_pickle=False)
+valid = trace["trace/valid"][0]
+left_height = trace["trace/metrics/left_foot_height"][0][valid]
+```
+
+NPZ arrays have axes `(seed, time, ...)`. Actions and `obs` are pre-step;
+`next_obs`, metrics, data, and actuator `info` are post-step. `valid` includes
+the first terminal transition and excludes frozen padding. There is no
+automatic reset. Rscope replays the nominal model, so use saved measurements
+and sampled parameters for quantitative contact/force analysis.
+
+For intermediate checkpoint bundles, add `--rscope_envs=4` to the training
+flags. Those bundles are stored under the training experiment's `diagnostics/`
+prefix in GCS; they are separate from the final bundle downloaded automatically.
+This adds evaluation and serialization work at each checkpoint callback.
+The recorder supports Rick's internal randomization; external wrapper domain
+randomization and vision environments are rejected explicitly.
+
+Both the playground changes and these orchestration changes must be available
+to the VM: playground is installed from the remote `rick` branch, not copied
+from your local working tree. No new training run is launched by installing
+this instrumentation.

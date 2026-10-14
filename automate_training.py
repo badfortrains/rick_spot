@@ -134,24 +134,90 @@ def _install_remote_requirements() -> None:
 
     uv = _find_uv()
     common = [uv, "pip", "install", "--upgrade", "--python", str(python)]
-    _run([*common, "--requirement", str(requirements), "gcsfs"])
+    _run([*common, "--requirement", str(requirements), "gcsfs", "rscope==0.0.8", "matplotlib"])
     _run([*common, "jax[cuda12]"])
 
 
 def _check_gcs_from_training_env(gcs_run_uri: str) -> None:
     python = DEFAULT_VENV / "bin/python"
-    probe = gcs_run_uri + "/status/storage-probe.txt"
+    file_probe = gcs_run_uri + "/status/storage-probe.txt"
+    checkpoint_probe = gcs_run_uri + "/status/orbax-probe"
     code = """
 import sys
 from etils import epath
+import jax.numpy as jnp
+import numpy as np
+import orbax.checkpoint as ocp
 
-path = epath.Path(sys.argv[1])
-path.write_text("ok\\n")
-if path.read_text() != "ok\\n":
+file_path = epath.Path(sys.argv[1])
+file_path.write_text("ok\\n")
+if file_path.read_text() != "ok\\n":
   raise RuntimeError("GCS probe contents did not match")
-path.unlink()
+file_path.unlink()
+
+checkpoint_path = epath.Path(sys.argv[2])
+checkpoint_path.rmtree(missing_ok=True)
+checkpointer = ocp.PyTreeCheckpointer()
+checkpointer.save(checkpoint_path, {"probe": jnp.arange(4)})
+restored = checkpointer.restore(checkpoint_path)
+np.testing.assert_array_equal(restored["probe"], np.arange(4))
+checkpoint_path.rmtree()
 """
-    _run([str(python), "-c", code, probe])
+    _run([str(python), "-c", code, file_probe, checkpoint_probe])
+
+
+def _prepare_cloud_trainer(run_id: str) -> Path:
+    """Creates a temporary trainer with URI-safe path handling."""
+    locate_code = """
+from importlib.metadata import distribution
+print(distribution("playground").locate_file("learning/train_jax_ppo.py"))
+"""
+    result = _run(
+        [str(DEFAULT_VENV / "bin/python"), "-c", locate_code],
+        capture_output=True,
+    )
+    source = Path(result.stdout.strip())
+    if not source.is_file():
+        raise FileNotFoundError(f"Installed training source does not exist: {source}")
+
+    replacements = (
+        (
+            'logdir = epath.Path(_LOGDIR.value or "logs").resolve() / exp_name',
+            'logdir = epath.Path(_LOGDIR.value or "logs")\n'
+            '  if "://" not in str(logdir):\n'
+            "    logdir = logdir.resolve()\n"
+            "  logdir = logdir / exp_name",
+        ),
+        (
+            "ckpt_path = epath.Path(_LOAD_CHECKPOINT_PATH.value).resolve()",
+            "ckpt_path = epath.Path(_LOAD_CHECKPOINT_PATH.value)\n"
+            '    if "://" not in str(ckpt_path):\n'
+            "      ckpt_path = ckpt_path.resolve()",
+        ),
+        (
+            'with open(ckpt_path / "config.json", "w", encoding="utf-8") as fp:',
+            'with (ckpt_path / "config.json").open('
+            '"w", encoding="utf-8") as fp:',
+        ),
+    )
+
+    patched = source.read_text(encoding="utf-8")
+    if '"diagnostics", False' not in patched:
+        raise RuntimeError(
+            "Installed playground lacks rollout diagnostics. Publish the local "
+            "playground changes to the rick branch before launching this workflow."
+        )
+    for old, new in replacements:
+        if old not in patched:
+            raise RuntimeError(
+                "Installed train_jax_ppo.py changed; cloud path compatibility "
+                f"patch could not find: {old}"
+            )
+        patched = patched.replace(old, new, 1)
+
+    destination = Path(f"/tmp/rick-training-{run_id}-train_jax_ppo.py")
+    destination.write_text(patched, encoding="utf-8")
+    return destination
 
 
 def _stream_command(
@@ -223,6 +289,7 @@ def _remote_worker(config: dict[str, object]) -> int:
         _wait_for_gpu()
         _install_remote_requirements()
         _check_gcs_from_training_env(gcs_run_uri)
+        trainer = _prepare_cloud_trainer(run_id)
         _upload_json(
             {
                 "env_name": env_name,
@@ -241,11 +308,8 @@ def _remote_worker(config: dict[str, object]) -> int:
                 "XLA_PYTHON_CLIENT_PREALLOCATE": "false",
             }
         )
-        trainer = DEFAULT_VENV / "bin/train-jax-ppo"
-        if not trainer.is_file():
-            raise FileNotFoundError(f"Training entry point does not exist: {trainer}")
-
         train_command = [
+            str(DEFAULT_VENV / "bin/python"),
             str(trainer),
             "--env_name",
             env_name,
@@ -280,6 +344,7 @@ def _remote_worker(config: dict[str, object]) -> int:
 
         render_root.mkdir(parents=True, exist_ok=True)
         render_command = [
+            str(DEFAULT_VENV / "bin/python"),
             str(trainer),
             "--env_name",
             env_name,
@@ -289,6 +354,7 @@ def _remote_worker(config: dict[str, object]) -> int:
             "--logdir",
             str(render_root),
             "--num_videos=1",
+            "--diagnostics",
         ]
         _run(render_command, cwd=DEFAULT_REMOTE_REPO, env=worker_env)
         videos = sorted(render_root.rglob("rollout0.mp4"))
@@ -298,6 +364,23 @@ def _remote_worker(config: dict[str, object]) -> int:
             )
 
         video_uri = gcs_run_uri + "/rollout0.mp4"
+        diagnostics_dir = videos[0].parent / "diagnostics"
+        if not (diagnostics_dir / "final" / "metadata.json").is_file():
+            raise RuntimeError("Renderer did not produce the diagnostic bundle")
+        # Include the exact invocation and orchestration source alongside the
+        # trainer's package revisions, source snapshots, and model assets.
+        (diagnostics_dir / "run.json").write_text(json.dumps({
+            "run_id": run_id, "train_command": train_command,
+            "render_command": render_command,
+            "latest_checkpoint_uri": latest_checkpoint_uri,
+            "latest_step": latest_step,
+        }, indent=2))
+        shutil.copy2(__file__, diagnostics_dir / "automate_training.py")
+        _run(["gcloud", "storage", "cp", experiment_uri + "/evaluation_history.json",
+              str(diagnostics_dir / "evaluation_history.json")], check=False)
+        diagnostics_uri = gcs_run_uri + "/diagnostics"
+        _run(["gcloud", "storage", "rsync", "--recursive",
+              str(diagnostics_dir), diagnostics_uri])
         training_log_uri = gcs_run_uri + "/training.log"
         _run(["gcloud", "storage", "cp", str(videos[0]), video_uri])
         _run(["gcloud", "storage", "cp", str(training_log), training_log_uri])
@@ -311,6 +394,7 @@ def _remote_worker(config: dict[str, object]) -> int:
             "run_id": run_id,
             "training_log_uri": training_log_uri,
             "video_uri": video_uri,
+            "diagnostics_uri": diagnostics_uri,
         }
         _upload_json(manifest, gcs_run_uri + "/manifest.json")
         _upload_json(
@@ -369,10 +453,15 @@ def _parse_local_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--project", default=os.environ.get("MY_PROJECT_ID"))
     parser.add_argument("--bucket", default=os.environ.get("MY_BUCKET_NAME"))
     parser.add_argument("--zone", default=os.environ.get("RICK_TRAINING_ZONE", "us-central1-a"))
-    parser.add_argument("--machine-type", default="g2-standard-12")
+    parser.add_argument("--machine-type", default="g2-standard-4")
     parser.add_argument("--source-machine-image", default="spot-updated")
     parser.add_argument("--instance-name")
-    parser.add_argument("--run-id", default=_default_run_id())
+    parser.add_argument("--run-id", help="Run ID (defaults to a new UTC timestamp)")
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Watch an existing --run-id and finish its local workflow without creating a VM",
+    )
     parser.add_argument("--env-name", default=DEFAULT_ENV_NAME)
     parser.add_argument("--poll-seconds", type=int, default=30)
     parser.add_argument("--pico-dir", type=Path, default=workspace / "rick_pico")
@@ -392,8 +481,13 @@ def _parse_local_args(argv: list[str]) -> argparse.Namespace:
         help="Extra train-jax-ppo flags after --",
     )
     args = parser.parse_args(argv)
+    if args.resume and not args.run_id:
+        parser.error("--resume requires --run-id from the existing run")
+    args.run_id = args.run_id or _default_run_id()
     if args.train_args[:1] == ["--"]:
         args.train_args = args.train_args[1:]
+    if args.resume and args.train_args:
+        parser.error("training flags cannot be changed when using --resume")
     return args
 
 
@@ -456,7 +550,8 @@ def _create_instance(args: argparse.Namespace, gcs_run_uri: str) -> None:
     if _instance_status(args) is not None:
         raise RuntimeError(
             f"Instance {args.instance_name!r} already exists in {args.zone}; "
-            "choose --instance-name or remove the old instance"
+            "use --resume with its --run-id to watch it, "
+            "or choose --instance-name for a new instance"
         )
 
     config_path = _write_json_temp(
@@ -592,6 +687,16 @@ def _build_firmware(pico_dir: Path) -> Path:
     return firmware
 
 
+def _download_diagnostics(run_dir: Path, manifest: dict[str, object]) -> None:
+    """Download diagnostics when available; older manifests remain resumable."""
+    uri = manifest.get("diagnostics_uri")
+    if uri:
+        destination = run_dir / "diagnostics"
+        destination.mkdir(parents=True, exist_ok=True)
+        _run(["gcloud", "storage", "rsync", "--recursive", str(uri), str(destination)])
+        print(f"Diagnostics: {destination}", flush=True)
+
+
 def _download_export_build(
     args: argparse.Namespace, gcs_run_uri: str, manifest: dict[str, object]
 ) -> Path:
@@ -627,6 +732,7 @@ def _download_export_build(
             f"but the remote manifest says {expected_step}"
         )
 
+    _download_diagnostics(run_dir, manifest)
     _export_policy(args, latest_checkpoint)
     firmware = _build_firmware(args.pico_dir)
     firmware_uri = gcs_run_uri + "/rick_v2_pico.uf2"
@@ -688,7 +794,10 @@ def _local_main(argv: list[str]) -> int:
         capture_output=True,
     )
     print(f"Run artifacts: {gcs_run_uri}", flush=True)
-    _create_instance(args, gcs_run_uri)
+    if args.resume:
+        print(f"Resuming watch of instance: {args.instance_name}", flush=True)
+    else:
+        _create_instance(args, gcs_run_uri)
     manifest = _wait_for_remote(args, gcs_run_uri)
     firmware = _download_export_build(args, gcs_run_uri, manifest)
     _ensure_instance_stopped(args)

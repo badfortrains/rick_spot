@@ -8,3 +8,6 @@ ml_collections
 imageio[ffmpeg]
 playground @ git+https://github.com/badfortrains/mujoco_playground.git@rick
 # We will install JAX specifically for CUDA in the startup script
+
+# Saved rollout playback; matches the diagnostic bundle format.
+rscope==0.0.8
