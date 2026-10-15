@@ -22,6 +22,7 @@ import time
 import traceback
 import urllib.error
 import urllib.request
+import zipfile
 
 
 METADATA_URL = (
@@ -32,6 +33,16 @@ REMOTE_CONFIG_KEY = "rick-training-config"
 DEFAULT_ENV_NAME = "RickJoystickFlatTerrain"
 DEFAULT_REMOTE_REPO = Path("/opt/rick_spot")
 DEFAULT_VENV = Path("/opt/venv")
+# Keep the backend migration and its reset/diagnostic support together on VMs
+# whose machine image or installed Git revision predates these changes.
+PLAYGROUND_SOURCE_FILES = (
+    "learning/train_jax_ppo.py",
+    "mujoco_playground/_src/locomotion/rick/joystick.py",
+    "mujoco_playground/_src/locomotion/rick/joystick_simple.py",
+    "mujoco_playground/_src/mjx_env.py",
+    "mujoco_playground/_src/wrapper.py",
+    "mujoco_playground/_src/rollout_diagnostics.py",
+)
 TERMINAL_INSTANCE_STATES = {"STOPPED", "SUSPENDED", "TERMINATED"}
 RESERVED_TRAIN_FLAGS = (
     "--env_name",
@@ -134,8 +145,36 @@ def _install_remote_requirements() -> None:
 
     uv = _find_uv()
     common = [uv, "pip", "install", "--upgrade", "--python", str(python)]
-    _run([*common, "--requirement", str(requirements), "gcsfs", "rscope==0.0.8", "matplotlib"])
+    _run([*common, "--requirement", str(requirements), "gcsfs", "rscope==0.0.8", "matplotlib",
+          # Also upgrade images that still contain the old requirements file.
+          "mujoco-mjx[warp]>=3.16.0"])
     _run([*common, "jax[cuda12]"])
+    _ensure_warp_driver_compatibility(common)
+
+
+def _ensure_warp_driver_compatibility(install_command: list[str]) -> None:
+    """Use NVIDIA's CUDA 12 Warp wheel on pre-R580 machine images."""
+    drivers = _run(
+        ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
+        capture_output=True,
+    ).stdout.splitlines()
+    if not drivers:
+        raise RuntimeError("nvidia-smi returned no GPU driver versions")
+    if all(int(driver.strip().split(".")[0]) >= 580 for driver in drivers):
+        return
+    # MJX pins a compatible Warp version. Preserve that version while choosing
+    # the CUDA 12 build, rather than upgrading the driver in a running VM.
+    code = """
+from importlib.metadata import version
+import platform
+release = version("warp-lang").split("+")[0]
+tag = {"x86_64": "manylinux_2_28_x86_64", "aarch64": "manylinux_2_34_aarch64"}[platform.machine()]
+print(f"https://github.com/NVIDIA/warp/releases/download/v{release}/warp_lang-{release}%2Bcu12-py3-none-{tag}.whl")
+"""
+    wheel = _run(
+        [str(DEFAULT_VENV / "bin/python"), "-c", code], capture_output=True
+    ).stdout.strip()
+    _run([*install_command, wheel])
 
 
 def _check_gcs_from_training_env(gcs_run_uri: str) -> None:
@@ -164,6 +203,35 @@ np.testing.assert_array_equal(restored["probe"], np.arange(4))
 checkpoint_path.rmtree()
 """
     _run([str(python), "-c", code, file_probe, checkpoint_probe])
+
+
+def _upload_playground_source(source: Path, destination: str) -> None:
+    """Upload the local backend implementation with this run's artifacts."""
+    with tempfile.TemporaryDirectory(prefix="rick-playground-source-") as temporary:
+        archive = Path(temporary) / "playground.zip"
+        with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
+            for name in PLAYGROUND_SOURCE_FILES:
+                bundle.write(source / name, arcname=name)
+        _run(["gcloud", "storage", "cp", str(archive), destination])
+
+
+def _install_playground_source(source_uri: str) -> None:
+    """Apply the matching local source after installing cloud dependencies."""
+    locate = 'from importlib.metadata import distribution; print(distribution("playground").locate_file(""))'
+    result = _run([str(DEFAULT_VENV / "bin/python"), "-c", locate], capture_output=True)
+    package_root = Path(result.stdout.strip())
+    with tempfile.TemporaryDirectory(prefix="rick-playground-source-") as temporary:
+        archive = Path(temporary) / "playground.zip"
+        _run(["gcloud", "storage", "cp", source_uri, str(archive)])
+        with zipfile.ZipFile(archive) as bundle:
+            if sorted(bundle.namelist()) != sorted(PLAYGROUND_SOURCE_FILES):
+                raise ValueError("Unexpected files in playground source archive")
+            # Write only the explicit allowlist, never extract arbitrary paths.
+            for name in PLAYGROUND_SOURCE_FILES:
+                destination = package_root / name
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(bundle.read(name))
+    print(f"Installed playground source from {source_uri}", flush=True)
 
 
 def _prepare_cloud_trainer(run_id: str) -> Path:
@@ -279,6 +347,10 @@ def _remote_worker(config: dict[str, object]) -> int:
     run_id = str(config["run_id"])
     env_name = str(config["env_name"])
     gcs_run_uri = str(config["gcs_run_uri"]).rstrip("/")
+    # Share compiled programs across runs and fresh Spot VMs. JAX includes the
+    # computation, jaxlib version, compiler flags, and GPU type in its cache key.
+    bucket_uri = "/".join(gcs_run_uri.split("/")[:3])
+    jax_cache_uri = bucket_uri + "/jax-cache"
     train_args = [str(arg) for arg in config.get("train_args", [])]
     training_root = gcs_run_uri + "/training"
     training_log = Path(f"/tmp/rick-training-{run_id}.log")
@@ -288,6 +360,8 @@ def _remote_worker(config: dict[str, object]) -> int:
     try:
         _wait_for_gpu()
         _install_remote_requirements()
+        if config.get("playground_source_uri"):
+            _install_playground_source(str(config["playground_source_uri"]))
         _check_gcs_from_training_env(gcs_run_uri)
         trainer = _prepare_cloud_trainer(run_id)
         _upload_json(
@@ -301,13 +375,29 @@ def _remote_worker(config: dict[str, object]) -> int:
         )
 
         worker_env = os.environ.copy()
+        # XLA's native filesystem cannot open gs:// paths. Keep its autotuning
+        # files local while JAX's epath-backed executable cache stays in GCS.
+        xla_autotune_cache = DEFAULT_REMOTE_REPO / "cache" / "xla-autotune"
+        xla_autotune_cache.mkdir(parents=True, exist_ok=True)
         worker_env.update(
             {
                 "MUJOCO_GL": "egl",
                 "PYTHONUNBUFFERED": "1",
                 "XLA_PYTHON_CLIENT_PREALLOCATE": "false",
+                "JAX_ENABLE_COMPILATION_CACHE": "true",
+                "JAX_COMPILATION_CACHE_DIR": jax_cache_uri,
+                "JAX_PERSISTENT_CACHE_ENABLE_XLA_CACHES": "none",
+                "XLA_FLAGS": (
+                    worker_env.get("XLA_FLAGS", "")
+                    + f" --xla_gpu_per_fusion_autotune_cache_dir={xla_autotune_cache}"
+                ).strip(),
+                # Cache expensive compilations without uploading every tiny JIT.
+                "JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS": "1.0",
+                "JAX_PERSISTENT_CACHE_MIN_ENTRY_SIZE_BYTES": "-1",
             }
         )
+        print(f"Persistent JAX compilation cache: {jax_cache_uri}", flush=True)
+        print(f"Local XLA autotuning cache: {xla_autotune_cache}", flush=True)
         train_command = [
             str(DEFAULT_VENV / "bin/python"),
             str(trainer),
@@ -315,6 +405,8 @@ def _remote_worker(config: dict[str, object]) -> int:
             env_name,
             "--logdir",
             training_root,
+            # Flags supplied after -- can explicitly select --impl=jax.
+            "--impl=warp",
             *train_args,
             # Training checkpoints go to GCS. Rendering is done separately to
             # a local path because ffmpeg requires a normal filesystem path.
@@ -389,6 +481,8 @@ def _remote_worker(config: dict[str, object]) -> int:
             "completed_at": _now(),
             "env_name": env_name,
             "experiment_uri": experiment_uri,
+            "jax_cache_uri": jax_cache_uri,
+            "playground_source_uri": config.get("playground_source_uri"),
             "latest_checkpoint_uri": latest_checkpoint_uri,
             "latest_step": latest_step,
             "run_id": run_id,
@@ -554,12 +648,15 @@ def _create_instance(args: argparse.Namespace, gcs_run_uri: str) -> None:
             "or choose --instance-name for a new instance"
         )
 
+    source_uri = gcs_run_uri + "/source/playground.zip"
+    _upload_playground_source(args.mujoco_playground_dir, source_uri)
     config_path = _write_json_temp(
         {
             "env_name": args.env_name,
             "gcs_run_uri": gcs_run_uri,
             "run_id": args.run_id,
             "train_args": args.train_args,
+            "playground_source_uri": source_uri,
         }
     )
     try:

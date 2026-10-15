@@ -4,6 +4,8 @@
 
 1. Create a uniquely named GCE Spot instance from `spot-updated`.
 2. Install/update the training dependencies in `/opt/venv`.
+   Apply the local Rick, wrapper, diagnostic, and trainer sources uploaded with
+   the run so these components match the local checkout.
 3. Train `RickJoystickFlatTerrain`, writing each Orbax checkpoint directly to
    GCS.
 4. Load the last complete checkpoint, render `rollout0.mp4`, and upload it.
@@ -38,6 +40,53 @@ extension.
 Before starting PPO, the worker performs a small GCS file check and an Orbax
 save/restore check. This catches cloud path or permission problems before the
 first expensive training checkpoint.
+
+JAX's persistent compilation cache is enabled automatically for both training
+and diagnostic/video rendering at `gs://$MY_BUCKET_NAME/jax-cache/`. The cache
+is shared across run IDs and written directly to GCS, so it survives fresh VMs
+and Spot interruptions. No extra command-line flags or image changes are needed.
+The first run populates the cache; later runs can reuse matching compilations.
+JAX checks the computation, jaxlib version, compiler flags, and GPU type, so
+dependency upgrades or training/model changes can require recompilation.
+Compilations taking more than one second are cached. The cache URI is printed
+in the worker log and recorded in `manifest.json`.
+
+XLA's separate GPU autotuning cache uses `/opt/rick_spot/cache/xla-autotune/`
+on the VM, shared by training and rendering. Automatic XLA caches under the
+GCS prefix are disabled because XLA's native filesystem does not support
+`gs://` URIs. JAX's compiled-program cache remains persistent in GCS.
+
+Cache storage persists until deleted; any bucket lifecycle rules still apply.
+Only trusted training accounts should have write access to the cache because
+it contains executable code. See the
+[JAX cache documentation](https://docs.jax.dev/en/latest/persistent_compilation_cache.html).
+
+New automated training runs use **MJX-Warp** on the NVIDIA GPU. The worker
+installs `mujoco-mjx[warp]>=3.16.0` and the compatible Warp runtime, including
+when launched from an older machine image. On pre-R580 drivers it selects
+NVIDIA's matching `+cu12` wheel because current standard Warp wheels require
+CUDA 13 drivers ([NVIDIA installation guide](https://nvidia.github.io/warp/v1.18/user_guide/installation.html)).
+JAX still trains the PPO networks;
+Warp runs the physics. Final diagnostics restore the saved Warp configuration.
+Use `--impl=jax` after `--` to compare against the previous physics backend:
+
+```bash
+./automate_training.py --zone=europe-west6-b -- --num_timesteps=22000000 --impl=jax
+```
+
+The launcher uploads six Python source files from `--mujoco-playground-dir`
+to the run's `source/playground.zip` before creating the VM. The worker applies
+them after dependency installation. Publishing these edits to the remote
+`rick` branch is therefore not required for automated runs. Other package
+files and robot XML/mesh assets still come from the existing remote workflow.
+Direct local playground use defaults to JAX for CPU/macOS compatibility;
+direct CUDA training can select `--impl=warp` after installing `.[cuda]`.
+
+Rick reserves 16 contacts per robot for the default 8192 parallel environments
+(`naconmax=131072` total), and 96 constraints per robot (`njmax=96`). If raising
+`num_envs` above 8192, also raise `naconmax` through
+`--playground_config_overrides='{"naconmax":262144}'` for 16384 environments.
+The backend is printed as `MJX physics backend: warp` in `training.log`.
 
 ## Run
 
@@ -153,7 +202,6 @@ This adds evaluation and serialization work at each checkpoint callback.
 The recorder supports Rick's internal randomization; external wrapper domain
 randomization and vision environments are rejected explicitly.
 
-Both the playground changes and these orchestration changes must be available
-to the VM: playground is installed from the remote `rick` branch, not copied
-from your local working tree. No new training run is launched by installing
-this instrumentation.
+The launcher supplies the local diagnostic implementation together with the
+Warp compatibility changes in the source archive described above. Installing
+this instrumentation does not launch a training run.

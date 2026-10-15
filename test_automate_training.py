@@ -3,9 +3,11 @@
 import contextlib
 import io
 from pathlib import Path
+import shutil
 import tempfile
 import unittest
 from unittest import mock
+import zipfile
 
 import automate_training as training
 
@@ -147,6 +149,19 @@ class DiagnosticsTests(unittest.TestCase):
                     "run_id": run_id, "env_name": "RickJoystickFlatTerrain",
                     "gcs_run_uri": uri, "train_args": [],
                 }), 0)
+                train_call = mocks["_stream_command"].call_args
+                self.assertIn("--impl=warp", train_call.args[0])
+                self.assertEqual(train_call.kwargs["env"]["JAX_COMPILATION_CACHE_DIR"],
+                                 "gs://bucket/jax-cache")
+                worker_env = train_call.kwargs["env"]
+                self.assertEqual(worker_env["JAX_PERSISTENT_CACHE_ENABLE_XLA_CACHES"], "none")
+                autotune_cache = repo / "cache" / "xla-autotune"
+                self.assertTrue(autotune_cache.is_dir())
+                self.assertIn(f"--xla_gpu_per_fusion_autotune_cache_dir={autotune_cache}",
+                              worker_env["XLA_FLAGS"])
+                self.assertNotIn("gs://", worker_env["XLA_FLAGS"])
+                render_call = next(c for c in commands.call_args_list if "--play_only" in c.args[0])
+                self.assertEqual(render_call.kwargs["env"], worker_env)
                 uploads = [c.args for c in mocks["_upload_json"].call_args_list]
                 manifest = next(payload for payload, dest in uploads if dest.endswith("/manifest.json"))
                 self.assertEqual(manifest["diagnostics_uri"], uri + "/diagnostics")
@@ -176,6 +191,69 @@ class DiagnosticsTests(unittest.TestCase):
             compile(contents, str(patched), "exec")
             self.assertIn('if "://" not in str(ckpt_path):', contents)
             self.assertIn('save_diagnostics("final"', contents)
+
+
+class PlaygroundSourceTests(unittest.TestCase):
+    def test_local_source_reaches_installed_package(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, installed = root / "source", root / "installed"
+            archive = root / "uploaded.zip"
+            for name in training.PLAYGROUND_SOURCE_FILES:
+                path = source / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(f"# Local implementation of {name}\n")
+
+            def cloud(command, **kwargs):
+                if "-c" in command:
+                    return mock.Mock(stdout=str(installed))
+                if command[-1].startswith("gs://"):
+                    shutil.copyfile(command[-2], archive)
+                else:
+                    shutil.copyfile(archive, command[-1])
+                return mock.Mock(returncode=0)
+
+            with mock.patch.object(training, "_run", side_effect=cloud):
+                training._upload_playground_source(source, "gs://bucket/source.zip")
+                training._install_playground_source("gs://bucket/source.zip")
+            for name in training.PLAYGROUND_SOURCE_FILES:
+                self.assertEqual((source / name).read_bytes(), (installed / name).read_bytes())
+
+    def test_unexpected_archive_paths_rejected_before_writing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive = root / "bad.zip"
+            installed = root / "installed"
+            with zipfile.ZipFile(archive, "w") as bundle:
+                for name in training.PLAYGROUND_SOURCE_FILES:
+                    bundle.writestr(name, "# source\n")
+                bundle.writestr("../outside.py", "raise RuntimeError()")
+
+            def cloud(command, **kwargs):
+                if "-c" in command:
+                    return mock.Mock(stdout=str(installed))
+                shutil.copyfile(archive, command[-1])
+
+            with mock.patch.object(training, "_run", side_effect=cloud):
+                with self.assertRaisesRegex(ValueError, "Unexpected files"):
+                    training._install_playground_source("gs://bucket/source.zip")
+            self.assertFalse(installed.exists())
+            self.assertFalse((root / "outside.py").exists())
+
+
+class WarpDriverTests(unittest.TestCase):
+    def test_current_driver_keeps_standard_warp_wheel(self):
+        with mock.patch.object(training, "_run", return_value=mock.Mock(stdout="580.95.05\n")) as run:
+            training._ensure_warp_driver_compatibility(["uv", "pip", "install"])
+        self.assertEqual(run.call_count, 1)
+
+    def test_older_image_selects_matching_cuda12_wheel(self):
+        wheel = "https://github.com/NVIDIA/warp/releases/download/v1.18.0/warp_lang-1.18.0%2Bcu12-py3-none-manylinux_2_28_x86_64.whl"
+        with mock.patch.object(training, "_run", side_effect=[
+            mock.Mock(stdout="535.104.05\n"), mock.Mock(stdout=wheel + "\n"), mock.Mock(),
+        ]) as run:
+            training._ensure_warp_driver_compatibility(["uv", "pip", "install"])
+        self.assertEqual(run.call_args.args[0], ["uv", "pip", "install", wheel])
 
 
 if __name__ == "__main__":

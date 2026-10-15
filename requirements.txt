@@ -1,5 +1,5 @@
-mujoco
-mujoco_mjx
+mujoco>=3.16.0
+mujoco-mjx[warp]>=3.16.0
 brax @ git+https://github.com/google/brax.git
 mediapy
 etils[epath-gcs]
